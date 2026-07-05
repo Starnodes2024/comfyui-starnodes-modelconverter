@@ -1,0 +1,3 @@
+torch>=2.0.0
+safetensors>=0.4.0
+comfy-kitchen>=0.1.0
