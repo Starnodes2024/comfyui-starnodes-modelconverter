@@ -7,6 +7,9 @@ ComfyUI custom nodes for converting, quantizing and splitting diffusion models.
 - **⭐ Star Ultimate Model Converter**: Convert and quantize diffusion models to various precision formats with intelligent layer-specific optimization
 - **⭐ Starnodes AIO Splitter**: Split all-in-one checkpoints into separate diffusion model, text encoder and VAE files
 
+<img width="755" height="309" alt="image" src="https://github.com/user-attachments/assets/a4a32045-0b9f-4807-8b95-1550009b43b8" />
+
+
 ## Features
 
 - **Multiple Format Support**: Convert models to NVFP4, FP8, INT8, INT8 ConvRot, FP16, or FP32
