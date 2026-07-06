@@ -70,12 +70,6 @@
       "fp8_layers": ["txt_mlp", "txt_mod"],
       "preserve_extended_metadata": false
     },
-    "SDXL": {
-      "_note": "Standard preservation layers for SDXL mixed precision models.",
-      "blacklist": ["time_embed", "label_emb", "add_time_embed", "add_embed", "out", "bias", "norm"],
-      "fp8_layers": [],
-      "preserve_extended_metadata": false
-    },
     "Wan (All Versions)": {
       "_note": "Groups Wan 2.1, 2.2, 2.3 and all t2v/i2v variants. They share the same DiT architecture, so the embedding layers to preserve are identical.",
       "blacklist": ["text_embedding", "time_embedding", "time_projection", "head"],
