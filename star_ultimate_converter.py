@@ -160,7 +160,14 @@ def load_input(files):
     for i, fp in enumerate(files):
         if len(files) > 1:
             print(f"📦 Loading shard {i + 1}/{len(files)}: {os.path.basename(fp)}")
-        part = safetensors.torch.load_file(fp)
+#        part = safetensors.torch.load_file(fp)
+        # NOTE: previously this called safetensors.torch.load_file(fp) directly,
+        # which access-violates on very large (60GB+) files on Windows due to
+        # an mmap/materialization issue in the safetensors library. ComfyUI's
+        # own loader (comfy.utils.load_torch_file) already handles these files
+        # fine elsewhere in this same node (Checkpoint/AIO modes), so we route
+        # through it here too instead of calling safetensors directly.
+        part = comfy.utils.load_torch_file(fp, safe_load=True)
         for k in part:
             if k in sd:
                 print(f"⚠️ Duplicate key '{k}' in {os.path.basename(fp)}, overwriting")
