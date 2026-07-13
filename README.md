@@ -1,4 +1,4 @@
-# ⭐ Starnodes Model Converter v1.1.0
+# ⭐ Starnodes Model Converter v1.2.0
 
 ComfyUI custom nodes for converting, quantizing and splitting diffusion models.
 
