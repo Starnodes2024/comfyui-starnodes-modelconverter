@@ -1,4 +1,4 @@
-# ⭐ Starnodes Model Converter v1.2.0
+# ⭐ Starnodes Model Converter v1.3.0
 
 ComfyUI custom nodes for converting, quantizing, analyzing, and managing diffusion models with advanced profile-based quantization.
 
@@ -9,7 +9,8 @@ ComfyUI custom nodes for converting, quantizing, analyzing, and managing diffusi
 - **⭐ Star Model Layers Info**: Analyze model layers and generate detailed quantization reports with optional profile saving
 - **⭐ Star Ultimate Model Converter Pro**: Profile-based mixed-precision quantization with strict conversion rules
 
-<img width="755" height="309" alt="image" src="https://github.com/user-attachments/assets/a4a32045-0b9f-4807-8b95-1550009b43b8" />
+<img width="854" height="296" alt="image" src="https://github.com/user-attachments/assets/a290dc38-7f4f-4977-a34d-ec8859531dc7" />
+
 
 
 ## Features
@@ -23,7 +24,7 @@ ComfyUI custom nodes for converting, quantizing, analyzing, and managing diffusi
 - **Progress Tracking**: Real-time conversion progress with detailed statistics
 - **Custom Path Support**: Load models from anywhere on your system, not just ComfyUI folders
 
-### New in v1.2.0
+### New in v1.3.0
 - **Profile-Based Quantization**: Extract quantization blueprints from optimized models and apply to new models
 - **Layer Analysis**: Detailed layer-by-layer format inspection with Normal and Tree views
 - **Profile Management**: Save, load, and apply quantization profiles with metadata tracking
