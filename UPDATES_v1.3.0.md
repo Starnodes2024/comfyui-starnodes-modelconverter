@@ -22,17 +22,17 @@ The converter now uses the same intelligent blacklist system as Star Ultimate Mo
 Fine-grained control over which source block types get quantized:
 
 **How it works**: Manual mode uses the profile as a matrix:
-- Profile says "BF16" + You set `quantize_bf16 = YES` → Converts to FP8
+- Profile says "BF16" + You set `quantize_bf16 = YES` → Converts to target format (e.g., INT4_CONVROT)
 - Profile says "BF16" + You set `quantize_bf16 = NO` → Keeps as BF16
-- Profile says "FP8_E4M3FN" + You set `quantize_fp8_e4m3fn = YES` → Converts to FP8
+- Profile says "FP8_E4M3FN" + You set `quantize_fp8_e4m3fn = YES` → Converts to target format
 - Profile says "FP8_E4M3FN" + You set `quantize_fp8_e4m3fn = NO` → Keeps as-is
 
 **Controls**:
 - `quantize_fp32`: Default NO (preserves high precision)
-- `quantize_bf16`: Default YES (converts to FP8)
-- `quantize_fp16`: Default YES (converts to FP8)
-- `quantize_fp8_e4m3fn`: Default YES (converts to FP8)
-- `quantize_fp8`: Default YES (converts to FP8)
+- `quantize_bf16`: Default YES (converts to target format)
+- `quantize_fp16`: Default YES (converts to target format)
+- `quantize_fp8_e4m3fn`: Default YES (converts to target format)
+- `quantize_fp8`: Default YES (converts to target format)
 
 ### 💎 Actual Deep Quantization
 

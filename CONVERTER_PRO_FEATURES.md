@@ -23,17 +23,17 @@ The Pro converter combines profile-based quantization with models.json blacklist
 Fine-grained control over which source block types get quantized.
 
 **How it works**: Manual mode uses the profile as a matrix. For each layer in the profile:
-- If the profile says "BF16" and you set `quantize_bf16 = YES` → Converts to FP8
+- If the profile says "BF16" and you set `quantize_bf16 = YES` → Converts to target format (e.g., INT4_CONVROT)
 - If the profile says "BF16" and you set `quantize_bf16 = NO` → Keeps as BF16
-- If the profile says "FP8_E4M3FN" and you set `quantize_fp8_e4m3fn = YES` → Converts to FP8
+- If the profile says "FP8_E4M3FN" and you set `quantize_fp8_e4m3fn = YES` → Converts to target format
 - If the profile says "FP8_E4M3FN" and you set `quantize_fp8_e4m3fn = NO` → Keeps as-is
 
 **Default Settings**:
 - **FP32**: Default NO (preserves high precision layers)
-- **BF16**: Default YES (converts BF16 → FP8)
-- **FP16**: Default YES (converts FP16 → FP8)
-- **FP8_E4M3FN**: Default YES (converts to FP8)
-- **FP8**: Default YES (converts to FP8)
+- **BF16**: Default YES (converts to target format)
+- **FP16**: Default YES (converts to target format)
+- **FP8_E4M3FN**: Default YES (converts to target format)
+- **FP8**: Default YES (converts to target format)
 
 ## Processing Priority (Highest to Lowest)
 

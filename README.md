@@ -247,11 +247,11 @@ Enable manual control over quantization (default: disabled). When enabled, you c
 
 #### **quantize_fp32/bf16/fp16/fp8_e4m3fn/fp8** (Required)
 [Manual Mode Only] Control whether to quantize each source block type:
-- **YES**: Convert layers of this type to FP8
+- **YES**: Convert layers of this type to target quantization format (NVFP4, INT4_CONVROT, etc.)
 - **NO**: Keep layers of this type in their original format
 
 **How it works**: Manual mode uses the profile as a matrix:
-- Profile says "BF16" + You set `quantize_bf16 = YES` → Converts to FP8
+- Profile says "BF16" + You set `quantize_bf16 = YES` → Converts to target format (e.g., INT4_CONVROT)
 - Profile says "BF16" + You set `quantize_bf16 = NO` → Keeps as BF16
 
 #### **device** (Required)

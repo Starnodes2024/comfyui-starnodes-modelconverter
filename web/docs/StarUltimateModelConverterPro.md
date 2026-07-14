@@ -17,11 +17,11 @@ The Star Ultimate Model Converter Pro enables reproducible, profile-based quanti
 - **target_quant_format**: Deep quantization format for heavily compressed layers
   - NVFP4, INT4_CONVROT, FP8, INT8, INT8_CONVROT, MXFP8
 - **manual_mode**: Enable manual control over quantization (default: disabled)
-- **quantize_fp32**: [Manual Mode] Convert FP32 layers to FP8 (default: no)
-- **quantize_bf16**: [Manual Mode] Convert BF16 layers to FP8 (default: yes)
-- **quantize_fp16**: [Manual Mode] Convert FP16 layers to FP8 (default: yes)
-- **quantize_fp8_e4m3fn**: [Manual Mode] Convert FP8_E4M3FN layers to FP8 (default: yes)
-- **quantize_fp8**: [Manual Mode] Convert FP8 layers to FP8 (default: yes)
+- **quantize_fp32**: [Manual Mode] Convert FP32 layers to target format (default: no)
+- **quantize_bf16**: [Manual Mode] Convert BF16 layers to target format (default: yes)
+- **quantize_fp16**: [Manual Mode] Convert FP16 layers to target format (default: yes)
+- **quantize_fp8_e4m3fn**: [Manual Mode] Convert FP8_E4M3FN layers to target format (default: yes)
+- **quantize_fp8**: [Manual Mode] Convert FP8 layers to target format (default: yes)
 - **device**: Processing device (cuda for GPU, cpu for CPU)
 
 ### Optional
@@ -68,17 +68,17 @@ adaln, q_norm, k_norm, embeddings, etc.
 Fine-grained control over which source block types get quantized:
 
 **How it works**: Manual mode uses the profile as a matrix:
-- Profile says "BF16" + You set `quantize_bf16 = YES` → Converts to FP8
+- Profile says "BF16" + You set `quantize_bf16 = YES` → Converts to target format (e.g., INT4_CONVROT)
 - Profile says "BF16" + You set `quantize_bf16 = NO` → Keeps as BF16
-- Profile says "FP8_E4M3FN" + You set `quantize_fp8_e4m3fn = YES` → Converts to FP8
+- Profile says "FP8_E4M3FN" + You set `quantize_fp8_e4m3fn = YES` → Converts to target format
 - Profile says "FP8_E4M3FN" + You set `quantize_fp8_e4m3fn = NO` → Keeps as-is
 
 **Default Settings**:
 - FP32: NO (preserves high precision)
-- BF16: YES (converts to FP8)
-- FP16: YES (converts to FP8)
-- FP8_E4M3FN: YES (converts to FP8)
-- FP8: YES (converts to FP8)
+- BF16: YES (converts to target format)
+- FP16: YES (converts to target format)
+- FP8_E4M3FN: YES (converts to target format)
+- FP8: YES (converts to target format)
 
 ### 💎 Actual Deep Quantization
 
