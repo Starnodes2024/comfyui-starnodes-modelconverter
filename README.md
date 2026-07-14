@@ -1,17 +1,20 @@
-# ⭐ Starnodes Model Converter v1.1.0
+# ⭐ Starnodes Model Converter v1.2.0
 
-ComfyUI custom nodes for converting, quantizing and splitting diffusion models.
+ComfyUI custom nodes for converting, quantizing, analyzing, and managing diffusion models with advanced profile-based quantization.
 
 **Included nodes:**
 
 - **⭐ Star Ultimate Model Converter**: Convert and quantize diffusion models to various precision formats with intelligent layer-specific optimization
-- **⭐ Starnodes AIO Splitter**: Split all-in-one checkpoints into separate diffusion model, text encoder and VAE files
+- **⭐ Star AIO Splitter**: Split all-in-one checkpoints into separate diffusion model, text encoder and VAE files
+- **⭐ Star Model Layers Info**: Analyze model layers and generate detailed quantization reports with optional profile saving
+- **⭐ Star Ultimate Model Converter Pro**: Profile-based mixed-precision quantization with strict conversion rules
 
 <img width="755" height="309" alt="image" src="https://github.com/user-attachments/assets/a4a32045-0b9f-4807-8b95-1550009b43b8" />
 
 
 ## Features
 
+### Core Conversion Features
 - **Multiple Format Support**: Convert models to NVFP4, FP8, MXFP8, INT8, INT8 ConvRot, INT4 ConvRot, FP16, or FP32
 - **Smart Layer Preservation**: Architecture-specific profiles ensure critical layers stay in high precision
 - **Automatic Dequantization**: Intelligently handles pre-quantized models for clean re-quantization
@@ -19,6 +22,14 @@ ComfyUI custom nodes for converting, quantizing and splitting diffusion models.
 - **Metadata Preservation**: Maintains model metadata and quantization information
 - **Progress Tracking**: Real-time conversion progress with detailed statistics
 - **Custom Path Support**: Load models from anywhere on your system, not just ComfyUI folders
+
+### New in v1.2.0
+- **Profile-Based Quantization**: Extract quantization blueprints from optimized models and apply to new models
+- **Layer Analysis**: Detailed layer-by-layer format inspection with Normal and Tree views
+- **Profile Management**: Save, load, and apply quantization profiles with metadata tracking
+- **Interactive Tooltips**: Hover over profiles to see model information and creation details
+- **Strict Conversion Rules**: 5-rule system ensures safe, predictable quantization
+- **AIO Management**: Complete workflow for splitting and merging all-in-one checkpoints
 
 ## Supported Models
 
@@ -159,6 +170,131 @@ Files are saved as `.safetensors` with the original filename plus a component su
 
 The node outputs a status string listing each saved component with its tensor count, file size and output path, plus the processing time. Components with no matching keys in the checkpoint are skipped with a warning.
 
+## ⭐ Star Model Layers Info
+
+Analyzes diffusion models and generates detailed reports about layer quantization, storage formats, and memory usage. Supports two view modes and optional profile saving for use with the Converter Pro.
+
+### Widget Guide
+
+#### **model_name**
+Select a diffusion model from your `models/diffusion_models` folder to analyze.
+
+#### **view_mode** (Optional)
+- **Normal View**: Flat list of all layers with full details
+- **Tree View**: Hierarchical grouped view with layer ranges (e.g., `[0-27]`) and sub-components
+
+#### **use_file_path** (Optional)
+Enable to analyze a model from a custom file path instead of the model list.
+
+#### **file_path** (Optional)
+Full path to a `.safetensors` file. Only used when "Use File Path" is enabled.
+
+#### **save_profile** (Optional)
+When enabled, saves a quantization profile as JSON in the `profiles/` folder. This profile can be used with Star Ultimate Model Converter Pro to apply the same quantization strategy to other models.
+
+### Output
+
+- **status**: Summary with model name, layer count, file size, and report location
+- **layers_info**: Complete multiline text report with all layer details
+
+### Files Created
+
+- **Report**: `output/modelinfo/{model_name}_{view_mode}.txt`
+- **Profile** (if enabled): `profiles/{model_name}.json`
+
+The profile includes metadata (model name, timestamp, layer count) and a complete layer-to-format mapping for profile-based conversion.
+
+## ⭐ Star Ultimate Model Converter Pro
+
+Advanced profile-based converter with models.json blacklist integration, manual mode control, and actual deep quantization using comfy-kitchen.
+
+### New in v1.3.0
+
+- **🚫 models.json Blacklist**: Automatically preserves critical layers (embeddings, norms, modulations) based on model architecture
+- **🎮 Manual Mode**: Fine-grained control over which source block types get quantized
+- **💎 Actual Deep Quantization**: Real NVFP4, INT4_CONVROT, MXFP8 quantization using comfy-kitchen (not just FP8 fallback)
+- **📊 Priority System**: Blacklist → Manual Mode → Profile → Fallback
+
+### Widget Guide
+
+#### **model_name** (Required)
+Select a diffusion model from your `models/diffusion_models` folder to quantize.
+
+#### **profile** (Required)
+Select a quantization profile from the dropdown. Profiles are created by Star Model Layers Info with "Save Profile" enabled.
+
+**Hover Tooltip**: Hover over a profile to see metadata including the original model name, creation date, and layer count.
+
+#### **model_type** (Required)
+Select the model architecture to load the appropriate blacklist from models.json:
+- Ideogram-4, Flux1/Flux2, SDXL, Qwen, LTX, Krea, Wan, ERNIE, Lens, etc.
+- Blacklisted layers are automatically preserved in BF16
+
+#### **use_blacklist** (Required)
+Enable/disable blacklist protection (default: yes). When enabled, layers matching blacklist patterns are preserved in BF16.
+
+#### **target_quant_format** (Required)
+Deep quantization format for heavily compressed layers:
+- **NVFP4**: 4-bit NVIDIA floating point
+- **INT4_CONVROT**: 4-bit INT with Hadamard rotation
+- **FP8**: 8-bit floating point
+- **INT8**: 8-bit integer
+- **INT8_CONVROT**: 8-bit INT with rotation
+- **MXFP8**: Microscaling FP8
+
+#### **manual_mode** (Required)
+Enable manual control over quantization (default: disabled). When enabled, you can control which source block types get quantized.
+
+#### **quantize_fp32/bf16/fp16/fp8_e4m3fn/fp8** (Required)
+[Manual Mode Only] Control whether to quantize each source block type:
+- **YES**: Convert layers of this type to FP8
+- **NO**: Keep layers of this type in their original format
+
+**How it works**: Manual mode uses the profile as a matrix:
+- Profile says "BF16" + You set `quantize_bf16 = YES` → Converts to FP8
+- Profile says "BF16" + You set `quantize_bf16 = NO` → Keeps as BF16
+
+#### **device** (Required)
+- **cuda**: GPU acceleration (much faster)
+- **cpu**: CPU processing (slower but works with any hardware)
+
+#### **output_name** (Optional)
+Custom name for the output model. Leave blank for automatic naming.
+
+### Processing Priority
+
+1. **Blacklist** (highest): Layers matching blacklist patterns → BF16
+2. **Manual Mode**: Override profile decisions for specific dtypes
+3. **Profile Format**: Use the format specified in the profile
+4. **Fallback**: Safe defaults (FP16 for norms, FP8 for others)
+
+### Output
+
+- **status**: Conversion summary with format breakdown and statistics
+- **model**: Converted MODEL object ready for immediate use
+
+The converted model is saved to `models/diffusion_models/` with proper quantization metadata.
+
+### Workflow Example
+
+```
+[Star Ultimate Model Converter Pro]
+  - model_name: ideogram4_fp8_scaled.safetensors
+  - profile: ideogram4_nvfp4_mixed.json
+  - model_type: Ideogram-4
+  - use_blacklist: yes
+  - target_quant: INT4_CONVROT
+  - manual_mode: disabled
+  - device: cuda
+  ↓
+Output: ideogram4_int4_convrot_pro.safetensors (2.45 GB)
+
+Conversion breakdown:
+  - blacklisted_to_bf16: 499 layers
+  - int4_convrot: 170 layers (actual quantization!)
+  - kept_non_float: 211 layers
+```
+
 ## Format Comparison
 
 | Format | Size | Quality | Compatibility | Speed |
@@ -266,7 +402,33 @@ This project is provided as-is for use with ComfyUI. Please respect the licenses
 
 Developed for the ComfyUI community with support for modern quantization techniques and model architectures.
 
+**Special thanks to:**
+- **[Comfy-Org Team](https://github.com/Comfy-Org)** for developing [comfy-kitchen](https://github.com/Comfy-Org/comfy-kitchen), the quantization library that powers NVFP4, FP8, MXFP8, INT8, and INT4 ConvRot formats
+- The ComfyUI community for testing and feedback
+
 ## Changelog
+
+### v1.3.0 (2026-07-14)
+- ✨ **Pro Converter Enhanced**: models.json blacklist integration with 15+ model profiles
+- 🎮 **Manual Mode**: Fine-grained control over which source block types get quantized
+- 💎 **Actual Deep Quantization**: Real NVFP4, INT4_CONVROT, MXFP8 quantization using comfy-kitchen
+- 📊 **Priority System**: Blacklist → Manual Mode → Profile → Fallback
+- 🔧 **Format Normalization**: Handles complex profile formats like "FP8_E4M3FN + SCALE"
+- 💾 **Proper Metadata**: Saves quantization metadata for ComfyUI compatibility
+- 🐛 **Fixed**: File saving and deep quantization now work correctly
+- 📚 **Documentation**: Updated with new features and examples
+
+### v1.2.0 (2025-01-13)
+- ✨ **New Node**: Star Model Layers Info - Analyze models with Normal/Tree views and profile saving
+- ✨ **New Node**: Star Ultimate Model Converter Pro - Profile-based mixed-precision quantization
+- 🔄 **Profile System**: Extract quantization blueprints and apply to new models
+- 📊 **Layer Analysis**: Detailed layer-by-layer format inspection with hierarchical tree view
+- 🎯 **Strict Rules**: 5-rule conversion system for safe, predictable quantization
+- 💡 **Interactive UI**: Hover tooltips show profile metadata
+- 📋 **Profile Management**: JSON-based profiles with metadata tracking
+- 🔌 **API Endpoint**: RESTful API for profile metadata
+- 📚 **Documentation**: Comprehensive guides for profile system
+- 🙏 **Credits**: Added attribution to Comfy-Org team for comfy-kitchen library
 
 ### v1.1.0 (2025-01-10)
 - ✨ **New Format**: Added INT4 ConvRot support - 4-bit quantization with Hadamard rotation for ~25% model size

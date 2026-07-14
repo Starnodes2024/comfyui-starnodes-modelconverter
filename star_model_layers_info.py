@@ -55,6 +55,10 @@ class StarModelLayersInfo:
                     "placeholder": "Enter path to .safetensors file",
                     "tooltip": "Full path to a .safetensors file. Only used when 'Use File Path' is enabled."
                 }),
+                "save_profile": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Save layer-by-layer quantization profile as JSON for use with Star Ultimate Model Converter Pro."
+                }),
             },
         }
 
@@ -64,7 +68,7 @@ class StarModelLayersInfo:
     CATEGORY = '⭐StarNodes/Model Tools'
     OUTPUT_NODE = True
 
-    def analyze(self, model_name, view_mode="Normal View", use_file_path=False, file_path=""):
+    def analyze(self, model_name, view_mode="Normal View", use_file_path=False, file_path="", save_profile=False):
         start_time = time.time()
         
         print("🔍 [Star Model Layers Info] Starting analysis...")
@@ -217,8 +221,13 @@ class StarModelLayersInfo:
         with open(output_file, "w", encoding="utf-8") as f:
             f.write(full_info)
         
+        # Save profile if requested
+        profile_file = None
+        if save_profile:
+            profile_file = self._save_quantization_profile(layer_data, base_name, input_path)
+        
         # Build status message
-        status = "\n".join([
+        status_lines = [
             f"✅ Model analysis complete ({view_mode})",
             f"Model: {base_name}",
             f"Total layers: {len(keys)}",
@@ -226,7 +235,12 @@ class StarModelLayersInfo:
             f"File size: {format_size(input_bytes)}",
             f"Analysis time: {duration:.1f}s",
             f"Report saved to: {output_file}",
-        ])
+        ]
+        
+        if profile_file:
+            status_lines.append(f"📋 Profile saved to: {profile_file}")
+        
+        status = "\n".join(status_lines)
         
         # Print status to console
         print("\n" + "="*60)
@@ -378,6 +392,39 @@ class StarModelLayersInfo:
             })
         
         return groups
+    
+    def _save_quantization_profile(self, layer_data, model_name, model_path):
+        """Save quantization profile as JSON for use with Model Converter Pro."""
+        from datetime import datetime
+        
+        # Create profiles directory
+        profiles_dir = os.path.join(os.path.dirname(__file__), "profiles")
+        os.makedirs(profiles_dir, exist_ok=True)
+        
+        # Build profile structure
+        profile = {
+            "__metadata__": {
+                "original_model_name": model_name,
+                "original_model_path": model_path,
+                "timestamp": datetime.now().isoformat(),
+                "total_layers": len(layer_data),
+                "created_by": "Star Model Layers Info"
+            },
+            "layers": {}
+        }
+        
+        # Map each layer to its format
+        for layer in layer_data:
+            profile["layers"][layer["key"]] = layer["format"]
+        
+        # Save profile
+        profile_file = os.path.join(profiles_dir, f"{model_name}.json")
+        print(f"📋 Saving quantization profile to: {profile_file}")
+        
+        with open(profile_file, "w", encoding="utf-8") as f:
+            json.dump(profile, f, indent=2)
+        
+        return profile_file
 
 
 NODE_CLASS_MAPPINGS = {"StarModelLayersInfo": StarModelLayersInfo}

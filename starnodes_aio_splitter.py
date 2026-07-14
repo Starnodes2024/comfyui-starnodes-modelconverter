@@ -74,7 +74,7 @@ class StarnodesAIOSplitter:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("status",)
     FUNCTION = "split"
-    CATEGORY = "Star"
+    CATEGORY = '⭐StarNodes/Model Tools'
     OUTPUT_NODE = True
 
     def split(self, checkpoint_name, save_model, save_text_encoder, save_vae):

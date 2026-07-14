@@ -283,7 +283,7 @@ class StarUltimateModelConverter:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("status",)
     FUNCTION = "convert"
-    CATEGORY = "Star"
+    CATEGORY = '⭐StarNodes/Model Tools'
     OUTPUT_NODE = True
 
     def convert(self, mode, diffusion_model, checkpoint, text_encoder, model_type, target_format, device, custom_path=""):
