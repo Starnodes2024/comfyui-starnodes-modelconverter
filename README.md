@@ -24,7 +24,7 @@ ComfyUI custom nodes for converting, quantizing, analyzing, and managing diffusi
 - **Progress Tracking**: Real-time conversion progress with detailed statistics
 - **Custom Path Support**: Load models from anywhere on your system, not just ComfyUI folders
 
-### New in v1.2.0
+### New in v1.3.0
 - **Profile-Based Quantization**: Extract quantization blueprints from optimized models and apply to new models
 - **Layer Analysis**: Detailed layer-by-layer format inspection with Normal and Tree views
 - **Profile Management**: Save, load, and apply quantization profiles with metadata tracking
