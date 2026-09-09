@@ -57,7 +57,26 @@ class StarnodesAIOSaver:
         start_time = time.time()
 
         ckpt_dir = folder_paths.get_folder_paths("checkpoints")[0]
+
+        # output_name is free text. Strip it down to a bare filename so it
+        # can't be used to write outside ckpt_dir (e.g. "../../evil" or an
+        # absolute path like "C:\\evil").
+        stripped_name = (output_name or "").strip()
+        safe_output_name = os.path.basename(stripped_name)
+        if not safe_output_name or safe_output_name != stripped_name:
+            raise ValueError(
+                "output_name must be a plain filename without path separators or a drive letter."
+            )
+        output_name = safe_output_name
+
         out_path = os.path.join(ckpt_dir, f"{output_name}.safetensors")
+
+        # Defense in depth: confirm the resolved path still lands inside
+        # ckpt_dir before writing anything to disk.
+        ckpt_dir_real = os.path.realpath(ckpt_dir)
+        out_path_real = os.path.realpath(out_path)
+        if os.path.commonpath([out_path_real, ckpt_dir_real]) != ckpt_dir_real:
+            raise ValueError("Resolved output path escapes the checkpoints folder.")
 
         components = [
             ("Model", model_name, "diffusion_models", model_prefix),

@@ -269,10 +269,19 @@ class StarUltimateModelConverterPro:
         # Determine output name
         if output_name and output_name.strip():
             base_name = output_name.strip()
+            # output_name is a free-text field. Strip it down to a bare
+            # filename so it can't be used to write outside output_dir
+            # (e.g. "../../evil" or an absolute path like "C:\\evil").
+            safe_base_name = os.path.basename(base_name)
+            if not safe_base_name or safe_base_name != base_name:
+                raise ValueError(
+                    "output_name must be a plain filename without path separators or a drive letter."
+                )
+            base_name = safe_base_name
         else:
             model_base = os.path.splitext(model_name)[0]
             base_name = f"{model_base}_{target_quant_format.lower()}_pro"
-        
+
         if not base_name.endswith(".safetensors"):
             base_name += ".safetensors"
         
@@ -288,7 +297,14 @@ class StarUltimateModelConverterPro:
         # Save converted model
         output_dir = folder_paths.get_folder_paths("diffusion_models")[0]
         output_path = os.path.join(output_dir, base_name)
-        
+
+        # Defense in depth: confirm the resolved path still lands inside
+        # output_dir before writing anything to disk.
+        output_dir_real = os.path.realpath(output_dir)
+        output_path_real = os.path.realpath(output_path)
+        if os.path.commonpath([output_path_real, output_dir_real]) != output_dir_real:
+            raise ValueError("Resolved output path escapes the diffusion_models folder.")
+
         print(f"💾 Saving converted model to: {output_path}")
         safetensors.torch.save_file(new_sd, output_path, metadata=final_metadata)
         
