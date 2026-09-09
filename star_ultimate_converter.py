@@ -1,9 +1,11 @@
 import os
 import re
+import sys
 import json
 import time
 import glob
 import math
+import ctypes
 import inspect
 
 import torch
@@ -117,6 +119,100 @@ DTYPE_NAMES = {
 }
 
 
+def _make_cpu_memory_trimmer():
+    """Best-effort, cross-platform function that asks the OS to reclaim this
+    process's freed-but-retained CPU memory. Never raises -- any failure
+    (wrong platform, missing library, permission issue) falls back to a
+    no-op, so this can never become a new way for a conversion to fail.
+
+    General-purpose C allocators (glibc's arena on Linux, the Windows heap
+    manager) tend to retain freed blocks for possible reuse rather than
+    returning pages to the OS, particularly under many differently-sized
+    allocate/free cycles -- the pattern produced by dequantizing scale-linked
+    fp8 tensors one at a time (see LazyStateDict/dequantize_input). Left
+    unchecked, a process's resident memory can grow well beyond what any
+    single live tensor requires and never come back down, even though
+    nothing is leaked at the Python level. Periodically nudging the OS to
+    reclaim what's actually unused keeps peak memory close to what the
+    conversion genuinely needs.
+    """
+    if sys.platform == "win32":
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            psapi = ctypes.WinDLL("psapi", use_last_error=True)
+            kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+            psapi.EmptyWorkingSet.argtypes = [ctypes.c_void_p]
+            psapi.EmptyWorkingSet.restype = ctypes.c_bool
+            handle = kernel32.GetCurrentProcess()
+
+            def _trim():
+                try:
+                    psapi.EmptyWorkingSet(handle)
+                except Exception:
+                    pass
+
+            return _trim
+        except Exception:
+            pass
+
+    elif sys.platform.startswith("linux"):
+        try:
+            libc = ctypes.CDLL("libc.so.6")
+            libc.malloc_trim.argtypes = [ctypes.c_size_t]
+            libc.malloc_trim.restype = ctypes.c_int
+
+            def _trim():
+                try:
+                    libc.malloc_trim(0)
+                except Exception:
+                    pass
+
+            return _trim
+        except Exception:
+            pass
+
+    def _noop():
+        pass
+
+    return _noop
+
+
+def _make_memory_trimmer():
+    """Combines the CPU trimmer above with PyTorch's own torch.cuda.empty_cache().
+
+    CUDA's caching allocator can exhibit the same retention pattern as the
+    OS heap above, just on GPU memory: many sequential, differently-sized
+    quantization allocations can accumulate reserved memory that's never
+    returned to the driver, which is more pronounced for formats whose
+    quantization path allocates a wider variety of tensor shapes and sizes
+    per layer (e.g. block-scaled formats like NVFP4, compared to a uniform
+    per-tensor scale like fp8). Unlike the CPU case, PyTorch already exposes
+    the fix as a first-class, always-safe API, so no platform-specific code
+    is needed here.
+    """
+    cpu_trim = _make_cpu_memory_trimmer()
+
+    def _trim():
+        cpu_trim()
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+    return _trim
+
+
+trim_process_memory = _make_memory_trimmer()
+
+# Call trim_process_memory() roughly this often (in tensors processed) during
+# the main conversion loop. Frequent enough to keep peak RSS down on
+# scale-heavy fp8 checkpoints; infrequent enough that the trim call's own
+# (small, OS-level) overhead stays negligible against real per-tensor
+# GPU/CPU quantization work.
+MEMORY_TRIM_INTERVAL = 50
+
+
 def detect_input_format(sd, metadata):
     counts = Counter(DTYPE_NAMES.get(v.dtype, str(v.dtype)) for v in sd.values())
     parts = [f"{name} ({n} tensors)" for name, n in counts.most_common()]
@@ -168,6 +264,41 @@ def blacklisted_dtype(k: str, keep_fp32, keep_fp16) -> torch.dtype:
         return torch.float16
 
     return torch.bfloat16
+
+
+def preserve_dtype(v, k=None, keep_fp32=None, keep_fp16=None):
+    """For tensors that are being kept as-is (not quantized further): if the tensor
+    is already native fp8, leave it untouched instead of upcasting to bf16.
+    Upcasting fp8 -> bf16 cannot recover precision the source already discarded, so
+    doing it unconditionally just doubles the storage of every already-fp8 tensor
+    (biases, norms, blacklisted layers, quantization fallbacks, ...) for zero
+    numerical benefit -- this matters a lot for checkpoints that ship natively in
+    fp8 (e.g. some Qwen-Image-Edit merges). Non-fp8 floating tensors still go
+    through the normal blacklisted-dtype policy (or plain bf16 if no key is given).
+
+    Quantization metadata tensors (any key whose last "."-segment contains
+    "scale" -- weight_scale, input_scale, pre_quant_scale, scale_weight, ...)
+    are never downcast either, regardless of dtype: these aren't weight data,
+    they're the scale a *different* tensor needs to be interpreted correctly.
+    A source model's own "input_scale" (a per-layer activation-quantization
+    scale) rides through this converter untouched whenever its paired weight
+    gets re-quantized to a different format, and it's still expected downstream
+    at full precision -- downcasting it to bf16 doesn't just lose precision,
+    it can hard-fail ComfyUI's fp8 inference path outright (it requires a
+    float32 scale) even though this converter never wrote that tensor itself.
+    """
+    if not v.dtype.is_floating_point:
+        return v
+
+    if v.dtype in FP8_DTYPES:
+        return v
+
+    if k is not None:
+        if "scale" in k.rsplit(".", 1)[-1].lower():
+            return v
+        return v.to(dtype=blacklisted_dtype(k, keep_fp32 or [], keep_fp16 or []))
+
+    return v.to(torch.bfloat16)
 
 
 def resolve_input(mode, diffusion_model, checkpoint, text_encoder, custom_path, vae="None"):
@@ -382,7 +513,179 @@ def build_output_path(out_dir, base_name, target_format):
     return os.path.join(out_dir, f"{stem}-{target_format}.safetensors")
 
 
+class LazyStateDict:
+    """A dict-like state-dict view backed by one or more safetensors files, reading
+    each tensor from disk lazily (one at a time, on access) instead of loading the
+    whole checkpoint into RAM up front.
+
+    This is what makes converting large checkpoints possible on memory-constrained
+    hosts: loading the entire file into RAM before any per-tensor decision is
+    made, then upcasting every fp8 tensor to bf16 in a single pass, can drive
+    peak memory to several times the checkpoint's own file size. With this
+    class, only whichever tensor is currently being processed is ever resident.
+
+    Supports the subset of dict behavior the rest of this module needs:
+    __contains__, __getitem__, __setitem__, __delitem__, pop, __iter__, keys,
+    values, items, __len__. Tensors that get overwritten in place -- e.g.
+    dequantize_input() synthesizes combined weight*scale tensors and removes
+    consumed scale/marker keys -- live in a small in-memory overlay, since the
+    backing files themselves are read-only.
+
+    Scale-linked dequantization (a fp8/int8 weight combined with its `_scale`
+    companion into a bf16 tensor) is deferred rather than eager: set_scale_pending()
+    just records the tiny scale tensor, and the actual `raw.float() * scale.float()
+    -> bf16` multiply happens the first time the key is read. This matters for
+    checkpoints that are mostly *properly-scaled* fp8 (as opposed to bare native
+    fp8 with nothing to dequantize) -- computing all of them eagerly, before the
+    conversion loop starts consuming them one at a time, would materialize the
+    *entire* dequantized (bf16, so ~2x the fp8 source) checkpoint in RAM at once,
+    reintroducing the same shape of peak-memory problem this class exists to avoid.
+
+    If `key_prefix` is given, only keys starting with it are exposed (with the
+    prefix stripped), which replaces the old pattern of eagerly loading an entire
+    AIO checkpoint just to throw away everything outside
+    "model.diffusion_model.".
+
+    Duplicate keys across shards: the last shard that defines a key wins, matching
+    the previous `sd.update(part)` behavior.
+    """
+
+    def __init__(self, files, key_prefix=None):
+        self._files = list(files)
+        self._prefix = key_prefix or ""
+        self._handles = [safetensors.safe_open(fp, framework="pt") for fp in self._files]
+
+        self._key_to_handle = {}
+        for idx, handle in enumerate(self._handles):
+            for raw_key in handle.keys():
+                if not raw_key.startswith(self._prefix):
+                    continue
+
+                key = raw_key[len(self._prefix):]
+
+                if key in self._key_to_handle:
+                    print(f"⚠️ Duplicate key '{key}' in {os.path.basename(self._files[idx])}, overwriting")
+
+                self._key_to_handle[key] = (idx, raw_key)
+
+        self._overlay = {}
+        self._deleted = set()
+        self._pending_scale = {}
+        self._metadata = self._handles[0].metadata() if self._handles else None
+
+    def metadata(self):
+        return self._metadata
+
+    def set_scale_pending(self, key, scale):
+        """Record that `key`'s value is its raw backing tensor times `scale`,
+        upcast to bf16 -- computed lazily the next time `key` is read, not here.
+        `key` must currently resolve to a real (not deleted) entry."""
+        if key not in self:
+            raise KeyError(key)
+
+        self._pending_scale[key] = scale
+
+    def _read_backing(self, key):
+        idx, raw_key = self._key_to_handle[key]
+        return self._handles[idx].get_tensor(raw_key)
+
+    def close(self):
+        for handle in self._handles:
+            exit_fn = getattr(handle, "__exit__", None)
+            if exit_fn is not None:
+                try:
+                    exit_fn(None, None, None)
+                except Exception:
+                    pass
+
+        self._handles = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+
+    def __contains__(self, key):
+        return key not in self._deleted and (key in self._overlay or key in self._key_to_handle)
+
+    def __getitem__(self, key):
+        if key in self._deleted:
+            raise KeyError(key)
+
+        if key in self._overlay:
+            return self._overlay[key]
+
+        if key in self._pending_scale:
+            raw = self._read_backing(key)
+            scale = self._pending_scale[key]
+            return (raw.to(torch.float32) * scale.to(torch.float32)).to(torch.bfloat16)
+
+        if key in self._key_to_handle:
+            return self._read_backing(key)
+
+        raise KeyError(key)
+
+    def __setitem__(self, key, value):
+        self._overlay[key] = value
+        self._pending_scale.pop(key, None)
+        self._deleted.discard(key)
+
+    def __delitem__(self, key):
+        if key not in self:
+            raise KeyError(key)
+
+        self._overlay.pop(key, None)
+        self._pending_scale.pop(key, None)
+        self._deleted.add(key)
+
+    def pop(self, key, *default):
+        if key in self:
+            value = self[key]
+            del self[key]
+            return value
+
+        if default:
+            return default[0]
+
+        raise KeyError(key)
+
+    def __iter__(self):
+        seen = set()
+
+        for key in self._overlay:
+            if key not in self._deleted:
+                seen.add(key)
+                yield key
+
+        for key in self._key_to_handle:
+            if key not in self._deleted and key not in seen:
+                yield key
+
+    def keys(self):
+        return list(iter(self))
+
+    def values(self):
+        for key in self:
+            yield self[key]
+
+    def items(self):
+        for key in self:
+            yield key, self[key]
+
+    def __len__(self):
+        return sum(1 for _ in self)
+
+
 def load_input(files):
+    if all(fp.endswith(".safetensors") for fp in files):
+        sd = LazyStateDict(files)
+        return sd, sd.metadata()
+
+    # Legacy / non-safetensors input (e.g. a pickled .ckpt VAE): can't be read
+    # lazily, so fall back to the previous eager loading behavior.
+    print("⚠️ Non-safetensors input detected; loading eagerly (streaming load requires .safetensors).")
+
     sd = {}
 
     for i, fp in enumerate(files):
@@ -397,8 +700,11 @@ def load_input(files):
 
         sd.update(part)
 
-    with safetensors.safe_open(files[0], framework="pt") as f:
-        orig_meta = f.metadata()
+    orig_meta = None
+
+    if files[0].endswith(".safetensors"):
+        with safetensors.safe_open(files[0], framework="pt") as f:
+            orig_meta = f.metadata()
 
     return sd, orig_meta
 
@@ -560,6 +866,20 @@ def dequantize_input(sd, metadata):
                 "Use a higher precision source model."
             )
 
+    # Combining a raw weight with its scale into a dequantized bf16 tensor is
+    # deferred (via set_scale_pending) rather than computed here, when the state
+    # dict supports it (LazyStateDict does; the legacy eager-dict fallback from
+    # load_input()/the AIO block does not, since it's already fully materialized
+    # anyway). Doing this eagerly for every scale-linked tensor in one pass -- as
+    # opposed to one at a time, when the conversion loop actually consumes each
+    # key -- would materialize the *entire* dequantized checkpoint in RAM at once
+    # for a checkpoint that's mostly properly-scaled fp8, which is exactly the
+    # kind of peak-memory blowup this module's streaming design exists to avoid.
+    set_pending = getattr(sd, "set_scale_pending", None)
+
+    def _dequantize_now(key, scale):
+        sd[key] = (sd[key].to(torch.float32) * scale.to(torch.float32)).to(torch.bfloat16)
+
     if "scaled_fp8" in sd:
         sd.pop("scaled_fp8")
 
@@ -568,7 +888,10 @@ def dequantize_input(sd, metadata):
             wk = k[: -len(".scale_weight")] + ".weight"
 
             if wk in sd:
-                sd[wk] = (sd[wk].to(torch.float32) * scale.to(torch.float32)).to(torch.bfloat16)
+                if set_pending is not None:
+                    set_pending(wk, scale)
+                else:
+                    _dequantize_now(wk, scale)
 
         for k in [k for k in sd if k.endswith(".scale_input")]:
             sd.pop(k)
@@ -583,14 +906,19 @@ def dequantize_input(sd, metadata):
             scale = sd.pop(k + "_scale", None)
 
             if scale is not None:
-                sd[k] = (v.to(torch.float32) * scale.to(torch.float32)).to(torch.bfloat16)
+                if set_pending is not None:
+                    set_pending(k, scale)
+                else:
+                    _dequantize_now(k, scale)
             elif v.dtype == torch.int8:
                 raise ValueError(f"int8 weight '{k}' has no '{k}_scale' tensor, cannot dequantize.")
 
-    for k, v in sd.items():
-        if v.dtype in FP8_DTYPES:
-            sd[k] = v.to(torch.bfloat16)
-
+    # Any fp8 tensor still present at this point either had a matching *_scale
+    # companion and was already converted above, or is genuinely native fp8 with
+    # nothing to dequantize and will be blacklisted or kept as-is by the caller.
+    # In neither case does upcasting it to bf16 recover any precision -- it would
+    # only double the storage of every such tensor for no benefit. See
+    # preserve_dtype(), used by the caller's keep-as-is branches instead.
     return sd
 
 
@@ -680,6 +1008,7 @@ class StarUltimateModelConverter:
     CATEGORY = "⭐StarNodes/Model Tools"
     OUTPUT_NODE = True
 
+    @torch.no_grad()
     def convert(
         self,
         mode,
@@ -694,6 +1023,8 @@ class StarUltimateModelConverter:
         svdquant_rank=64,
         svdquant_refine_iters=10,
     ):
+        # This is pure weight transformation, never training, so gradient
+        # tracking should never be active here.
         configs = load_model_configs()
 
         (
@@ -754,37 +1085,67 @@ class StarUltimateModelConverter:
 
             ckpt_path = folder_paths.get_full_path("checkpoints", checkpoint)
             base_name = os.path.splitext(os.path.basename(ckpt_path))[0]
-            orig_meta = None
+            files = [ckpt_path]
 
             if ckpt_path.endswith(".safetensors"):
-                with safetensors.safe_open(ckpt_path, framework="pt") as f:
-                    orig_meta = f.metadata()
+                # Stream the checkpoint instead of loading it whole: for AIO mode
+                # this is the entire multi-GB file, and for Checkpoint mode the old
+                # code loaded the *whole* AIO file (unet + CLIP + VAE) just to keep
+                # the unet-prefixed keys and throw the rest away.
+                if mode == "Checkpoint":
+                    print(f"✂️ Extracting diffusion model from AIO checkpoint: {checkpoint}")
 
-            full_sd = comfy.utils.load_torch_file(ckpt_path, safe_load=True)
+                    sd = LazyStateDict(files, key_prefix=AIO_MODEL_PREFIX)
 
-            if mode == "Checkpoint":
-                print(f"✂️ Extracting diffusion model from AIO checkpoint: {checkpoint}")
+                    if len(sd) == 0:
+                        raise ValueError(
+                            f"No '{AIO_MODEL_PREFIX}' keys found in {os.path.basename(ckpt_path)}. "
+                            "Is this an all-in-one checkpoint?"
+                        )
 
-                sd = {
-                    k[len(AIO_MODEL_PREFIX):]: v
-                    for k, v in full_sd.items()
-                    if k.startswith(AIO_MODEL_PREFIX)
-                }
+                    orig_meta = sd.metadata()
+                    input_bytes = sum(v.numel() * v.element_size() for v in sd.values())
+                    output_path = build_output_path(diffusion_models_dir(), base_name, target_format)
 
-                input_bytes = sum(v.numel() * v.element_size() for v in sd.values())
-                output_path = build_output_path(diffusion_models_dir(), base_name, target_format)
-                files = [ckpt_path]
+                else:
+                    print(f"🔄 AIO Mode: Processing entire checkpoint intact: {checkpoint}")
 
-                del full_sd
+                    sd = LazyStateDict(files)
+                    orig_meta = sd.metadata()
+                    input_bytes = os.path.getsize(ckpt_path)
+                    checkpoints_dir = folder_paths.get_folder_paths("checkpoints")[0]
+                    output_path = build_output_path(checkpoints_dir, f"{base_name}_AIO", target_format)
 
             else:
-                print(f"🔄 AIO Mode: Processing entire checkpoint intact: {checkpoint}")
+                # Legacy / non-safetensors checkpoint (e.g. a pickled .ckpt): can't
+                # be read lazily, so fall back to the previous eager loading
+                # behavior.
+                print("⚠️ Non-safetensors checkpoint detected; loading eagerly (streaming load requires .safetensors).")
 
-                sd = full_sd
-                input_bytes = os.path.getsize(ckpt_path)
-                checkpoints_dir = folder_paths.get_folder_paths("checkpoints")[0]
-                output_path = build_output_path(checkpoints_dir, f"{base_name}_AIO", target_format)
-                files = [ckpt_path]
+                orig_meta = None
+                full_sd = comfy.utils.load_torch_file(ckpt_path, safe_load=True)
+
+                if mode == "Checkpoint":
+                    print(f"✂️ Extracting diffusion model from AIO checkpoint: {checkpoint}")
+
+                    sd = {
+                        k[len(AIO_MODEL_PREFIX):]: v
+                        for k, v in full_sd.items()
+                        if k.startswith(AIO_MODEL_PREFIX)
+                    }
+
+                    input_bytes = sum(v.numel() * v.element_size() for v in sd.values())
+                    output_path = build_output_path(diffusion_models_dir(), base_name, target_format)
+
+                    del full_sd
+
+                else:
+                    print(f"🔄 AIO Mode: Processing entire checkpoint intact: {checkpoint}")
+
+                    sd = full_sd
+                    input_bytes = os.path.getsize(ckpt_path)
+                    checkpoints_dir = folder_paths.get_folder_paths("checkpoints")[0]
+                    output_path = build_output_path(checkpoints_dir, f"{base_name}_AIO", target_format)
 
         else:
             files, out_dir, base_name = resolve_input(
@@ -833,6 +1194,9 @@ class StarUltimateModelConverter:
             for i, (k, v) in enumerate(sd.items()):
                 pbar.update_absolute(i + 1)
 
+                if (i + 1) % MEMORY_TRIM_INTERVAL == 0:
+                    trim_process_memory()
+
                 if v.dtype.is_floating_point:
                     new_sd[k] = v.to(target_dtype)
                     counts[target_format] += 1
@@ -843,6 +1207,9 @@ class StarUltimateModelConverter:
         else:
             for i, (k, v) in enumerate(sd.items()):
                 pbar.update_absolute(i + 1)
+
+                if (i + 1) % MEMORY_TRIM_INTERVAL == 0:
+                    trim_process_memory()
 
                 if mode == "AIO":
                     if k.startswith(AIO_MODEL_PREFIX):
@@ -879,7 +1246,7 @@ class StarUltimateModelConverter:
 
                     else:
                         if v.dtype.is_floating_point:
-                            new_sd[k] = v.to(dtype=torch.bfloat16)
+                            new_sd[k] = preserve_dtype(v, k)
                             counts["kept bf16 (VAE/Misc)"] += 1
                         else:
                             new_sd[k] = v
@@ -923,7 +1290,7 @@ class StarUltimateModelConverter:
 
                 if any(name in k for name in active_blacklist):
                     if v.dtype.is_floating_point:
-                        new_sd[k] = v.to(dtype=blacklisted_dtype(k, active_keep_fp32, active_keep_fp16))
+                        new_sd[k] = preserve_dtype(v, k, active_keep_fp32, active_keep_fp16)
                         counts["kept bf16/f16/f32"] += 1
                     else:
                         new_sd[k] = v
@@ -961,7 +1328,7 @@ class StarUltimateModelConverter:
                             print(f"⚠️ Forced INT8 failed for {k}: {e}")
 
                             if v.dtype.is_floating_point:
-                                new_sd[k] = v.to(dtype=torch.bfloat16)
+                                new_sd[k] = preserve_dtype(v, k)
                                 counts["kept bf16"] += 1
                             else:
                                 new_sd[k] = v
@@ -1003,7 +1370,7 @@ class StarUltimateModelConverter:
                             print(f"⚠️ OVERRIDE int4_convrot failed for {k}: {e}")
 
                             if v.dtype.is_floating_point:
-                                new_sd[k] = v.to(dtype=torch.bfloat16)
+                                new_sd[k] = preserve_dtype(v, k)
                                 counts["kept bf16"] += 1
                             else:
                                 new_sd[k] = v
@@ -1046,7 +1413,7 @@ class StarUltimateModelConverter:
                             print(f"⚠️ OVERRIDE int8_convrot failed for {k}: {e}")
 
                             if v.dtype.is_floating_point:
-                                new_sd[k] = v.to(dtype=torch.bfloat16)
+                                new_sd[k] = preserve_dtype(v, k)
                                 counts["kept bf16"] += 1
                             else:
                                 new_sd[k] = v
@@ -1064,7 +1431,14 @@ class StarUltimateModelConverter:
                         weight_quantized = ck.quantize_per_tensor_fp8(v_tensor, weight_scale)
 
                         new_sd[k] = weight_quantized.cpu()
-                        new_sd[f"{base_k_file}.weight_scale"] = weight_scale.to(torch.bfloat16).cpu()
+                        # Keep the scale in float32: ComfyUI's fp8 inference path (at
+                        # least for Flux) hard-requires a float32 scale when it
+                        # re-quantizes activations against this weight, and even where
+                        # it doesn't hard-fail, a bf16 scale (~3 significant decimal
+                        # digits) gets multiplied into every element of the tensor on
+                        # dequantization, so downcasting it saves 2 bytes on one scalar
+                        # at the cost of real precision loss across the whole layer.
+                        new_sd[f"{base_k_file}.weight_scale"] = weight_scale.cpu()
 
                         quant_map["layers"][base_k_meta] = {"format": "float8_e4m3fn"}
                         counts["fp8"] += 1
@@ -1129,7 +1503,7 @@ class StarUltimateModelConverter:
                             print(f"⚠️ SVDQuant failed for {k}: {e}")
 
                             if v.dtype.is_floating_point:
-                                new_sd[k] = v.to(dtype=torch.bfloat16)
+                                new_sd[k] = preserve_dtype(v, k)
                                 counts["kept bf16"] += 1
                             else:
                                 new_sd[k] = v
@@ -1144,12 +1518,12 @@ class StarUltimateModelConverter:
                         blk_idx = block_index_from_key(k)
 
                         if "attn.out_proj" in k:
-                            new_sd[k] = v.to(dtype=torch.bfloat16)
+                            new_sd[k] = preserve_dtype(v, k)
                             counts["kept bf16 (out_proj)"] += 1
                             continue
 
                         if blk_idx in MINIMAX_H3_BOUNDARY_BLOCKS:
-                            new_sd[k] = v.to(dtype=torch.bfloat16)
+                            new_sd[k] = preserve_dtype(v, k)
                             counts["kept bf16 (boundary block)"] += 1
                             continue
 
@@ -1184,7 +1558,7 @@ class StarUltimateModelConverter:
                             except Exception as e:
                                 print(f"⚠️ NATIVE_MIX qkv_proj failed for {k}: {e}")
 
-                                new_sd[k] = v.to(dtype=torch.bfloat16)
+                                new_sd[k] = preserve_dtype(v, k)
                                 counts["kept bf16"] += 1
 
                                 if device == "cuda":
@@ -1216,7 +1590,7 @@ class StarUltimateModelConverter:
                             except Exception as e:
                                 print(f"⚠️ NATIVE_MIX mlp failed for {k}: {e}")
 
-                                new_sd[k] = v.to(dtype=torch.bfloat16)
+                                new_sd[k] = preserve_dtype(v, k)
                                 counts["kept bf16"] += 1
 
                                 if device == "cuda":
@@ -1224,7 +1598,7 @@ class StarUltimateModelConverter:
 
                             continue
 
-                        new_sd[k] = v.to(dtype=torch.bfloat16)
+                        new_sd[k] = preserve_dtype(v, k)
                         counts["kept bf16 (native_mix other)"] += 1
                         continue
 
@@ -1255,7 +1629,7 @@ class StarUltimateModelConverter:
                             print(f"⚠️ W4A8 ConvRot failed for {k}: {e}")
 
                             if v.dtype.is_floating_point:
-                                new_sd[k] = v.to(dtype=torch.bfloat16)
+                                new_sd[k] = preserve_dtype(v, k)
                                 counts["w4a8_failed_bf16"] += 1
                             else:
                                 new_sd[k] = v
@@ -1320,7 +1694,11 @@ class StarUltimateModelConverter:
                         store_quantized_weight(new_sd, k, tensors)
 
                         if pre_quant_scale is not None:
-                            new_sd[f"{base_k_file}.pre_quant_scale"] = pre_quant_scale.to(torch.bfloat16).cpu()
+                            # Keep float32 for the same reason as weight_scale above:
+                            # this gets applied against activations at inference time,
+                            # and a bf16 per-channel scale risks both precision loss and
+                            # backend dtype-compatibility failures.
+                            new_sd[f"{base_k_file}.pre_quant_scale"] = pre_quant_scale.cpu()
 
                         layer_conf = {"format": fmt_name}
 
@@ -1337,26 +1715,35 @@ class StarUltimateModelConverter:
                         quant_map["layers"][base_k_meta] = layer_conf
                         counts[target_format] += 1
 
+                        if device == "cuda":
+                            del v_tensor, v_tensor_ready
+
                     except Exception as e:
                         print(f"⚠️ Quantization failed for {k}: {e}")
 
                         if v.dtype.is_floating_point:
-                            new_sd[k] = v.to(dtype=torch.bfloat16)
+                            new_sd[k] = preserve_dtype(v, k)
                             counts["kept bf16"] += 1
                         else:
                             new_sd[k] = v
                             counts["kept"] += 1
 
-                    if device == "cuda":
-                        del v_tensor
+                        if device == "cuda":
+                            del v_tensor
 
                 else:
                     if v.dtype.is_floating_point:
-                        new_sd[k] = v.to(dtype=torch.bfloat16)
+                        new_sd[k] = preserve_dtype(v, k)
                         counts["kept bf16"] += 1
                     else:
                         new_sd[k] = v
                         counts["kept"] += 1
+
+        # Done reading from the source file(s) -- release the safetensors handles
+        # (matters most on Windows, where a lingering open mmap can block later
+        # operations on the same file).
+        if hasattr(sd, "close"):
+            sd.close()
 
         final_metadata = OrderedDict()
 
