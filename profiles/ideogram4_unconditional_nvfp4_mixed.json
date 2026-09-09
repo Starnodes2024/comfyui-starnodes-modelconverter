@@ -1,7 +1,6 @@
 {
   "__metadata__": {
     "original_model_name": "ideogram4_unconditional_nvfp4_mixed",
-    "original_model_path": "E:\\AI\\ComfyUI-Easy-Install\\ComfyUI-Easy-Install\\ComfyUI\\models\\diffusion_models\\ideogram4_unconditional_nvfp4_mixed.safetensors",
     "timestamp": "2026-07-13T20:58:17.499077",
     "total_layers": 1050,
     "created_by": "Star Model Layers Info"

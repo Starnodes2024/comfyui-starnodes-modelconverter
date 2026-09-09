@@ -224,7 +224,7 @@ class StarModelLayersInfo:
         # Save profile if requested
         profile_file = None
         if save_profile:
-            profile_file = self._save_quantization_profile(layer_data, base_name, input_path)
+            profile_file = self._save_quantization_profile(layer_data, base_name)
         
         # Build status message
         status_lines = [
@@ -393,19 +393,24 @@ class StarModelLayersInfo:
         
         return groups
     
-    def _save_quantization_profile(self, layer_data, model_name, model_path):
+    def _save_quantization_profile(self, layer_data, model_name):
         """Save quantization profile as JSON for use with Model Converter Pro."""
         from datetime import datetime
-        
+
         # Create profiles directory
         profiles_dir = os.path.join(os.path.dirname(__file__), "profiles")
         os.makedirs(profiles_dir, exist_ok=True)
-        
+
         # Build profile structure
+        # NOTE: we intentionally do not store the original model's absolute
+        # filesystem path here. Profiles are meant to be shared/reused across
+        # machines, and an absolute path can leak local usernames or
+        # directory layout (and is also served back verbatim by the
+        # /starnodes/profile/{name} tooltip API). original_model_name already
+        # carries the useful, shareable part (the model's filename).
         profile = {
             "__metadata__": {
                 "original_model_name": model_name,
-                "original_model_path": model_path,
                 "timestamp": datetime.now().isoformat(),
                 "total_layers": len(layer_data),
                 "created_by": "Star Model Layers Info"
