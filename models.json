@@ -16,10 +16,33 @@
     "int4_convrot_layers": [],
     "keep_fp32": [],
     "keep_fp16": [],
+    "awq_w4a16_layers": [],
     "nvfp4_group_size": null,
     "preserve_extended_metadata": false
   },
   "models": {
+    "YuE2": {
+      "_note": "YuE2 3B MoT (AR text_encoders + NAR diffusion_model). Reverse-engineered from yue2_3b_int8_convrot.safetensors: norms, biases, latent position embedding, and vae2llm (VAE-latent-in projection) stay unquantized; qkv_proj/o_proj/mlp gate_up_proj/down_proj, time_embedder, llm2vae, embed_tokens and lm_head are quantized. The VAE (vae.*) is plain FP16 in the reference file, so it's excluded here too.",
+      "blacklist": [
+        "vae.",
+        "bias",
+        "norm",
+        "latent_pos_embed",
+        "vae2llm"
+      ],
+      "fp8_layers": [],
+      "force_int8_layers": [],
+      "awq_prescale_layers": [],
+      "pruned_extra_blacklist": [],
+      "int8_convrot_layers": [],
+      "int4_convrot_layers": [],
+      "keep_fp32": [],
+      "keep_fp16": [
+        "vae."
+      ],
+      "nvfp4_group_size": null,
+      "preserve_extended_metadata": false
+    },
     "ACE-Step": {
       "_note": "ACE-Step audio model. Keeps embeddings, modulation, norms, biases, and output heads unquantized.",
       "blacklist": [
@@ -56,7 +79,9 @@
         "proj_out",
         "x_embedder",
         "t_embedder",
-        "context_embedder"
+        "context_embedder",
+        "net.blocks.0.",
+        "net.blocks.1.adaln_modulation"
       ],
       "fp8_layers": [],
       "preserve_extended_metadata": false
@@ -68,7 +93,9 @@
         "ref_image_patch_embedder",
         "norm1.linear",
         "norm_out.linear_1",
-        "norm_out.linear_2"
+        "norm_out.linear_2",
+        "time_caption_embed",
+        "x_embedder"
       ],
       "fp8_layers": [],
       "preserve_extended_metadata": false
@@ -87,7 +114,8 @@
         "class_embedding",
         "single_stream_modulation",
         "double_stream_modulation_img",
-        "double_stream_modulation_txt"
+        "double_stream_modulation_txt",
+        "distilled_guidance_layer"
       ],
       "fp8_layers": [],
       "preserve_extended_metadata": false
@@ -117,7 +145,7 @@
       "preserve_extended_metadata": false
     },
     "Flux1 / Flux2": {
-      "_note": "Groups Flux.1-dev, Flux.1-Fill, Flux.2-dev, and Flux.2-Klein variants.",
+      "_note": "Quality-safe W4A8. Attention=W4A8, MLPs=FP16. ~36GB. Best fidelity.",
       "blacklist": [
         "bias",
         "txt_attn",
@@ -133,7 +161,43 @@
         "double_stream_modulation_txt"
       ],
       "fp8_layers": [],
-      "preserve_extended_metadata": false
+      "preserve_extended_metadata": false,
+      "w4a8_blacklist": [
+        "ff.net",
+        "mlp.fc",
+        "linear2",
+        "img_mlp",
+        "txt_mlp"
+      ],
+      "w4a8_keep_fp16": [
+        "ff.net",
+        "mlp.fc",
+        "linear2",
+        "img_mlp",
+        "txt_mlp"
+      ]
+    },
+    "Flux2 Tight (W4A8 Full)": {
+      "_note": "Aggressive W4A8. ALL linear layers quantized including MLPs. ~20-22GB. Smaller but may lose fine detail/text rendering.",
+      "blacklist": [
+        "bias",
+        "txt_attn",
+        "img_in",
+        "txt_in",
+        "time_in",
+        "vector_in",
+        "guidance_in",
+        "final_layer",
+        "class_embedding",
+        "single_stream_modulation",
+        "double_stream_modulation_img",
+        "double_stream_modulation_txt"
+      ],
+      "fp8_layers": [],
+      "preserve_extended_metadata": false,
+      "w4a8_blacklist": [],
+      "w4a8_keep_fp32": [],
+      "w4a8_keep_fp16": []
     },
     "Ideogram-4": {
       "_note": "Diffusion Transformer using flow matching. Crucial to preserve embedding, output mapping, QK-RMSNorm, and modulation layers to maintain INT4 quality.",
@@ -185,10 +249,10 @@
       "preserve_extended_metadata": false
     },
     "Lens": {
-      "_note": "'txt_' skips ALL text matrices to avoid the amax() numel==0 error with empty prompts.",
+      "_note": "'txt' skips ALL text matrices to avoid the amax() numel==0 error with empty prompts.",
       "blacklist": [
         "bias",
-        "txt_",
+        "txt",
         "img_in",
         "time_in",
         "vector_in",
@@ -196,7 +260,12 @@
         "final_layer",
         "class_embedding",
         "single_stream_modulation",
-        "double_stream_modulation_img"
+        "double_stream_modulation_img",
+        "time_text_embed",
+        "norm_out",
+        "proj_out",
+        "img_mod.1",
+        "txt_mod.1"
       ],
       "fp8_layers": [],
       "preserve_extended_metadata": false
@@ -226,6 +295,35 @@
       "fp8_layers": [],
       "preserve_extended_metadata": true
     },
+    "LTX-2.5": {
+      "_note": "LTX-2.5 AVTransformer3DModel. VERIFIED against Lightricks' official ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors reference release.",
+      "blacklist": [
+        "vae.",
+        "vocoder.",
+        "norm",
+        "bias",
+        "to_gate_logits",
+        "adaln_single",
+        "patchify_proj",
+        "proj_out",
+        "scale_shift_table"
+      ],
+      "fp8_layers": [],
+      "force_int8_layers": [],
+      "awq_prescale_layers": [],
+      "pruned_extra_blacklist": [],
+      "int8_convrot_layers": [],
+      "int4_convrot_layers": [],
+      "keep_fp32": [
+        "scale_shift_table"
+      ],
+      "keep_fp16": [],
+      "w4a8_blacklist": [],
+      "w4a8_keep_fp32": [],
+      "w4a8_keep_fp16": [],
+      "nvfp4_group_size": null,
+      "preserve_extended_metadata": true
+    },
     "Qwen-Image": {
       "_note": "Groups Qwen-Image-Edit-2511 and 2512.",
       "blacklist": [
@@ -239,6 +337,33 @@
       "fp8_layers": [
         "txt_mlp",
         "txt_mod"
+      ],
+      "preserve_extended_metadata": false
+    },
+    "Qwen-Image W4A8": {
+      "_note": "Optimized for Qwen-Image-Edit-2511/2512 multi-angle & identity. Protects critical layers + keeps text/modulation higher precision for better consistency. Expected size ~13.3-14.2 GB.",
+      "blacklist": [
+        "img_in",
+        "txt_in",
+        "time_text_embed",
+        "norm_out",
+        "proj_out",
+        "img_mod.1",
+        "txt_mod",
+        "img_mod"
+      ],
+      "fp8_layers": [
+        "txt_mlp"
+      ],
+      "w4a8_blacklist": [
+        "txt_mlp",
+        "txt_mod",
+        "img_mod"
+      ],
+      "w4a8_keep_fp16": [
+        "txt_mlp",
+        "txt_mod",
+        "img_mod"
       ],
       "preserve_extended_metadata": false
     },
@@ -257,7 +382,7 @@
       "preserve_extended_metadata": false
     },
     "SeedVR (All Versions)": {
-      "_note": "Groups SeedVR and SeedVR2. Uses an MMDiT backbone with Shifted Window Attention. Positional/patch embeddings and modulations must be protected to prevent grid artifacts and structural destruction.",
+      "_note": "Groups SeedVR and SeedVR2. Uses an MMDiT backbone with Shifted Window Attention. vid QKV, vid_in, vid_out, emb_in preserved.",
       "blacklist": [
         "bias",
         "norm",
@@ -280,13 +405,16 @@
         "single_stream_modulation",
         "double_stream_modulation",
         "vae",
-        "attn.proj_qkv_vid"
+        "attn.proj_qkv.vid",
+        "vid_in",
+        "vid_out",
+        "emb_in"
       ],
       "fp8_layers": [],
       "preserve_extended_metadata": false
     },
     "Text-Encoder": {
-      "_note": "Generic profile for Text Encoders (e.g., CLIP, T5, Llama). Keeps embeddings and layer norms in bf16 to maintain text comprehension accuracy.",
+      "_note": "Generic profile for Text Encoders (e.g., CLIP, T5, Llama, Mistral). CRITICAL: preserve_extended_metadata MUST be true for LLM-based encoders (Mistral/Gemma) so ComfyUI loads the correct hidden_size config.",
       "blacklist": [
         "bias",
         "norm",
@@ -302,10 +430,10 @@
         "patch_embed"
       ],
       "fp8_layers": [],
-      "preserve_extended_metadata": false
+      "preserve_extended_metadata": true
     },
     "Unknown": {
-      "_note": "Universal fallback profile. Preserves almost all typical embedding, norm, bias, and projection layers across DiTs, UNets, and Transformers to ensure stability.",
+      "_note": "Universal fallback profile.",
       "blacklist": [
         "bias",
         "norm",
@@ -338,7 +466,7 @@
       "preserve_extended_metadata": false
     },
     "Wan (All Versions)": {
-      "_note": "Groups Wan 2.1, 2.2, 2.3 and all t2v/i2v variants. They share the same DiT architecture, so the embedding layers to preserve are identical.",
+      "_note": "Groups Wan 2.1, 2.2, 2.3 and all t2v/i2v variants.",
       "blacklist": [
         "text_embedding",
         "time_embedding",
@@ -349,7 +477,7 @@
       "preserve_extended_metadata": false
     },
     "Z-Image": {
-      "_note": "Groups Z-Image-Turbo and Z-Image-Base. Using the more comprehensive Base blacklist ensures quality across both.",
+      "_note": "Groups Z-Image-Turbo and Z-Image-Base.",
       "blacklist": [
         "attention",
         "adaLN_modulation",
@@ -359,13 +487,23 @@
         "x_embedder",
         "noise_refiner",
         "context_refiner",
-        "t_embedder"
+        "t_embedder",
+        "cap_pad_token",
+        "attention_norm1",
+        "attention_norm2",
+        "ffn_norm1",
+        "ffn_norm2",
+        "k_norm",
+        "q_norm",
+        "x_pad_token",
+        "clip_text_pooled_proj",
+        "time_text_embed"
       ],
       "fp8_layers": [],
       "preserve_extended_metadata": false
     },
     "minimax_h3": {
-      "_note": "Minimax H3 video/audio DiT, matched against Abiray's Minimax-H3-nvfp4-INT4-INT8-Convrot reference dumps. Only norms, token_refiner, time_embedder, condition_proj, patch projections, final_layer's norm/video_out/audio_out, and final_layer.adaln_proj.linear specifically stay unquantized -- block-level adaln_proj.linear is NOT blacklisted here so it quantizes normally under int4_tensorwise (matching the reference non-pruned file, where it's INT4 like every other block GEMM). force_int8_layers still routes block-level adaln_proj.linear to plain INT8 under int8_convrot/int4_convrot specifically (see code: force_int8 is skipped for int4_tensorwise targets), since ConvRot's groupsize (256) doesn't divide 2688. final_layer.adaln_proj.linear is blacklisted explicitly (not caught by force_int8_layers, since blacklist is checked first) -- reference dump shows it BF16-untouched in both pruned and non-pruned files. For *_pruned target formats, pruned_extra_blacklist additionally excludes block-level adaln_proj.linear and adaln_t_table, since the pruned architecture replaces that projection with a rank-8 timestep lookup table this converter does not (yet) synthesize -- do not use *_pruned formats on this profile until that reconstruction is implemented. keep_fp32 matches the minimax_h3_ref_* reference profiles' precision for rope.inv_freq/video_patch_proj/audio_patch_proj/final_layer.video_out/final_layer.audio_out/adaln_t_table -- these are blacklisted (or added to blacklist under *_pruned via pruned_extra_blacklist) and would otherwise silently fall back to bf16 via blacklisted_dtype()'s default. keep_fp16 intentionally left empty here (unlike the nvfp4 reference profiles) because final_layer.adaln_proj.linear must stay BF16 per the reference dump, and adding keep_fp16 ['adaln_proj.linear'] would incorrectly promote it to fp16 since that substring also matches 'final_layer.adaln_proj.linear'.",
+      "_note": "Minimax H3 video/audio DiT.",
       "blacklist": [
         "norm1",
         "norm2",
@@ -494,7 +632,7 @@
       "preserve_extended_metadata": true
     },
     "minimax_h3_int4_tensorwise_experimental": {
-      "_note": "Experimental INT4 tensorwise profile for Minimax-H3. Does NOT match official NVFP4/FP8/INT8 ConvRot reference dumps.",
+      "_note": "Experimental INT4 tensorwise profile for Minimax-H3.",
       "blacklist": [
         "blocks.0.",
         "blocks.1.",
@@ -536,7 +674,7 @@
       "preserve_extended_metadata": true
     },
     "minimax_h3_int8convrot_int4fc2": {
-      "_note": "Mixed Minimax-H3 recipe. Use target_format int8_convrot. INT8 ConvRot is the base format. Only blocks 2-46 mlp.fc2 are overridden to INT4 ConvRot.",
+      "_note": "Mixed Minimax-H3 recipe. Use target_format int8_convrot.",
       "blacklist": [
         "blocks.0.",
         "blocks.1.",
@@ -580,7 +718,7 @@
       "preserve_extended_metadata": true
     },
     "minimax_h3_int8convrot_int4mlp": {
-      "_note": "Mixed Minimax-H3 recipe. Use target_format int8_convrot. INT8 ConvRot is the base format. Blocks 2-46 mlp.fc1 and mlp.fc2 are overridden to INT4 ConvRot.",
+      "_note": "Mixed Minimax-H3 recipe. Use target_format int8_convrot.",
       "blacklist": [
         "blocks.0.",
         "blocks.1.",
@@ -625,7 +763,7 @@
       "preserve_extended_metadata": true
     },
     "minimax_h3_te": {
-      "_note": "Minimax H3 text encoder (Qwen3.5-VL based). visual.* (vision tower) is left fully untouched. embed_tokens is force-int8'd, matching the reference release which never pushes it to nvfp4/convrot/int4_tensorwise. o_proj/down_proj get a weight-magnitude AWQ-style pre-scale under nvfp4 only (no calibration pass available in this pipeline, so it's an approximation of true AWQ).",
+      "_note": "Minimax H3 text encoder (Qwen3.5-VL based).",
       "blacklist": [
         "visual."
       ],
@@ -646,7 +784,7 @@
       "preserve_extended_metadata": true
     },
     "minimax_h3_vae": {
-      "_note": "Minimax H3 VAE (MiniMaxH3VideoVAE). Only decoder transformer blocks attn/mlp 2D weights are quantized -- to_qkv, to_out, ff.w1, ff.w2 across all 36 blocks. Encoder is 100% Conv3d (ndim>2, skipped automatically by the ndim==2 check). Decoder norms, scales, embedders, proj_out, quant_conv, post_quant_conv and latent stats stay unquantized. Use target_format: int8.",
+      "_note": "Minimax H3 VAE (MiniMaxH3VideoVAE).",
       "blacklist": [
         "norm1",
         "norm2",
@@ -670,6 +808,61 @@
       "int4_convrot_layers": [],
       "keep_fp32": [],
       "keep_fp16": [],
+      "nvfp4_group_size": null,
+      "preserve_extended_metadata": true
+    },
+    "ltx25_gemma4_te": {
+      "_note": "LTX-2.5 Gemma4UnifiedForConditionalGeneration text encoder.",
+      "blacklist": [
+        "vision_model",
+        "text_embedding_projection",
+        "audio_projector",
+        "multi_modal_projector",
+        "embed_tokens",
+        "norm",
+        "bias",
+        "layer_scalar"
+      ],
+      "fp8_layers": [],
+      "force_int8_layers": [],
+      "awq_prescale_layers": [],
+      "pruned_extra_blacklist": [],
+      "int8_convrot_layers": [],
+      "int4_convrot_layers": [],
+      "keep_fp32": [],
+      "keep_fp16": [],
+      "w4a8_blacklist": [],
+      "w4a8_keep_fp32": [],
+      "w4a8_keep_fp16": [],
+      "nvfp4_group_size": null,
+      "preserve_extended_metadata": true
+    },
+    "ltx25_vae": {
+      "_note": "LTX-2.5 video VAE.",
+      "blacklist": [
+        "conv_in",
+        "conv_out",
+        "shared_adaln",
+        "t_embedder",
+        "norm",
+        "bias",
+        "scale_shift_table",
+        "upsamples",
+        "context_proj",
+        "type_emb",
+        "per_channel_statistics"
+      ],
+      "fp8_layers": [],
+      "force_int8_layers": [],
+      "awq_prescale_layers": [],
+      "pruned_extra_blacklist": [],
+      "int8_convrot_layers": [],
+      "int4_convrot_layers": [],
+      "keep_fp32": [],
+      "keep_fp16": [],
+      "w4a8_blacklist": [],
+      "w4a8_keep_fp32": [],
+      "w4a8_keep_fp16": [],
       "nvfp4_group_size": null,
       "preserve_extended_metadata": true
     }
