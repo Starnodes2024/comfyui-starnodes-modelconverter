@@ -1,20 +1,21 @@
 """Star Model Layers Info - Analyze and report layer quantization information.
 
 Supports:
-  * .safetensors (native, FP8, INT8, INT8 ConvRot, NVFP4, MXFP8, W4A4, AWQ, ...)
-  * .gguf       (all GGML quant types, plus custom Q8_CR / Q4_CR_W4A4 metadata
-                 written by the ComfyUI-GGUF fork)
+  .safetensors (native, FP8, INT8, INT8 ConvRot, NVFP4, MXFP8, W4A4, AWQ, ...)
+  .gguf        (all GGML quant types, plus custom Q8_CR / Q4_CR_W4A4 metadata
+                written by the ComfyUI-GGUF fork)
 
-The safetensors path parses the authoritative per-tensor ``.comfy_quant``
+The safetensors path parses the authoritative per-tensor `.comfy_quant`
 JSON blobs that ComfyUI's quantization tooling writes next to each quantized
-weight. It only falls back to the legacy global ``_quantization_metadata``
-header or the ``.weight_scale`` heuristic when per-tensor metadata is absent.
+weight. It only falls back to the legacy global `_quantization_metadata`
+header or the `.weight_scale` heuristic when per-tensor metadata is absent.
 
-The GGUF path reads the GGUF header directly via the ``gguf`` package, so the
+The GGUF path reads the GGUF header directly via the `gguf` package, so the
 report reflects on-disk storage (Q4_K, Q6_K, IQ*, F16, BF16, ...) rather than
-a dequantized torch dtype. Custom ``comfy.gguf.quant.*`` fields are also read
+a dequantized torch dtype. Custom `comfy.gguf.quant.*` fields are also read
 so Q8_CR / Q4_CR_W4A4 tensors are labelled correctly.
 """
+
 import os
 import re
 import json
@@ -71,6 +72,20 @@ GGML_QTYPE_LABELS = {
     "I8": "GGUF_I8",
     "COPY": "GGUF_COPY",
 }
+
+# Must match star_ultimate_converter.py's AIO_MODEL_PREFIX exactly.
+# The converter strips this prefix from tensor keys when writing metadata
+# entries, so the analyzer must try stripping it too.
+AIO_MODEL_PREFIX = "model.diffusion_model."
+
+# Ordered list of prefixes to try stripping/adding when matching tensor
+# keys against legacy _quantization_metadata entries. Order matters:
+# longest first so "model.diffusion_model." matches before "model.".
+_KEY_PREFIXES = [
+    AIO_MODEL_PREFIX,          # "model.diffusion_model."
+    "diffusion_model.",        # standalone diffusion model files
+    "model.",                  # generic model wrapper
+]
 
 # Folders to search for models, in order of preference.
 MODEL_FOLDERS = ("diffusion_models", "unet_gguf", "unet")
@@ -165,7 +180,6 @@ class StarModelLayersInfo:
     def analyze(self, model_name, view_mode="Normal View",
                 use_file_path=False, file_path="", save_profile=False):
         start_time = time.time()
-
         print("🔍 [Star Model Layers Info] Starting analysis...")
 
         # -- Resolve input path -----------------------------------------
@@ -181,7 +195,6 @@ class StarModelLayersInfo:
         base_name = os.path.splitext(os.path.basename(input_path))[0]
         input_bytes = os.path.getsize(input_path)
         is_gguf = input_path.lower().endswith(".gguf")
-
         kind = "GGUF" if is_gguf else "safetensors"
         print(f"📦 Loading {kind} model: {os.path.basename(input_path)}")
 
@@ -200,7 +213,6 @@ class StarModelLayersInfo:
 
         # -- Summary ----------------------------------------------------
         duration = time.time() - start_time
-
         summary_lines = [
             f"Model: {base_name}",
             f"File: {os.path.basename(input_path)}",
@@ -209,7 +221,6 @@ class StarModelLayersInfo:
             f"Total parameters: {total_params:,}",
             f"Total tensors: {len(layer_data)}",
         ]
-
         if is_gguf:
             arch = extra_meta.get("general.architecture")
             if arch:
@@ -253,7 +264,6 @@ class StarModelLayersInfo:
         output_file = os.path.join(
             output_dir, f"{base_name}{ext_suffix}{view_suffix}.txt"
         )
-
         print(f"💾 Saving layer info to: {output_file}")
         with open(output_file, "w", encoding="utf-8") as f:
             f.write(full_info)
@@ -279,12 +289,58 @@ class StarModelLayersInfo:
             status_lines.append(f"📋 Profile saved to: {profile_file}")
 
         status = "\n".join(status_lines)
-
         print("\n" + "=" * 60)
         print(status)
         print("=" * 60 + "\n")
-
         return (status, full_info)
+
+    # ------------------------------------------------------------------
+    # Key matching helper
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _lookup_legacy_meta(base_key, legacy_metadata):
+        """Find a legacy metadata entry for a tensor base_key.
+
+        The converter (star_ultimate_converter.py) strips AIO_MODEL_PREFIX
+        ("model.diffusion_model.") from tensor keys when writing metadata
+        entries. So a tensor key like "model.diffusion_model.layers.0.ff.w1"
+        gets stored as "layers.0.ff.w1" in the metadata. We must replicate
+        that same stripping logic here to find the match.
+
+        Returns the metadata dict if found, or None.
+        """
+        if not legacy_metadata:
+            return None
+
+        # 1. Exact match (no prefix difference)
+        if base_key in legacy_metadata:
+            return legacy_metadata[base_key]
+
+        # 2. Try stripping known prefixes (longest first)
+        for prefix in _KEY_PREFIXES:
+            if base_key.startswith(prefix):
+                candidate = base_key[len(prefix):]
+                if candidate in legacy_metadata:
+                    return legacy_metadata[candidate]
+
+        # 3. Try adding known prefixes (reverse: metadata has prefix,
+        #    tensor key doesn't)
+        for prefix in _KEY_PREFIXES:
+            candidate = f"{prefix}{base_key}"
+            if candidate in legacy_metadata:
+                return legacy_metadata[candidate]
+
+        # 4. Last resort: suffix matching on last 3 dot-separated segments
+        base_parts = base_key.split(".")
+        if len(base_parts) >= 3:
+            base_suffix = ".".join(base_parts[-3:])
+            for mk, mv in legacy_metadata.items():
+                mk_parts = mk.split(".")
+                if len(mk_parts) >= 3 and ".".join(mk_parts[-3:]) == base_suffix:
+                    return mv
+
+        return None
 
     # ------------------------------------------------------------------
     # Safetensors scan
@@ -299,10 +355,6 @@ class StarModelLayersInfo:
         sd = safetensors.torch.load_file(input_path)
 
         # -- Per-tensor comfy_quant metadata ----------------------------
-        # ComfyUI's quantization tooling writes an authoritative JSON blob
-        # named "<layer>.comfy_quant" next to every custom-quantized weight.
-        # This is where ConvRot / NVFP4 / MXFP8 / W4A4 configs actually
-        # live. The legacy global header may be absent.
         per_tensor_configs = {}
         for key in list(sd.keys()):
             if not key.endswith(".comfy_quant"):
@@ -340,13 +392,11 @@ class StarModelLayersInfo:
 
         for key in sorted(keys):
             tensor = sd[key]
-
             dtype_name = DTYPE_NAMES.get(tensor.dtype, str(tensor.dtype))
             shape = list(tensor.shape)
             num_params = tensor.numel()
             total_params += num_params
             size_bytes = num_params * tensor.element_size()
-
             storage_format = dtype_name
 
             if key.endswith(".weight"):
@@ -357,30 +407,28 @@ class StarModelLayersInfo:
                     storage_format = self._label_from_comfy_quant(
                         per_tensor_configs[base_key], layer_stats
                     )
-
-                # 2. Legacy global metadata (fallback)
-                elif base_key in legacy_metadata:
-                    storage_format = self._label_from_legacy_meta(
-                        legacy_metadata[base_key], layer_stats
-                    )
-
-                # 3. Scale-tensor heuristic (older FP8 / INT8 files)
-                elif f"{key}_scale" in keys:
-                    storage_format = f"{dtype_name} + scale"
-                    layer_stats["scaled"] += 1
-
-                # 4. Default dtype
                 else:
-                    layer_stats[dtype_name] += 1
+                    # 2. Legacy global metadata with prefix normalization
+                    legacy_conf = self._lookup_legacy_meta(base_key, legacy_metadata)
+
+                    if legacy_conf is not None:
+                        storage_format = self._label_from_legacy_meta(
+                            legacy_conf, layer_stats
+                        )
+                    # 3. Scale-tensor heuristic (older FP8 / INT8 files)
+                    elif f"{key}_scale" in keys:
+                        storage_format = f"{dtype_name} + scale"
+                        layer_stats["scaled"] += 1
+                    # 4. Default dtype
+                    else:
+                        layer_stats[dtype_name] += 1
 
             elif key.endswith("_scale"):
                 storage_format = f"{dtype_name}_SCALE"
                 layer_stats["scale_tensor"] += 1
-
             elif key.endswith(".comfy_quant"):
                 storage_format = "METADATA"
                 layer_stats["metadata"] += 1
-
             else:
                 layer_stats[dtype_name] += 1
 
@@ -442,23 +490,34 @@ class StarModelLayersInfo:
         return fmt.upper()
 
     def _label_from_legacy_meta(self, meta, layer_stats):
-        """Build a label from the older global _quantization_metadata dict."""
+        """Build a label from the older global _quantization_metadata dict.
+
+        This is the fallback path used when per-tensor .comfy_quant blobs are
+        absent (e.g. files produced by TensorWiseINT8Layout.quantize() via
+        comfy-kitchen, which only writes to the global header). Must stay in
+        sync with _label_from_comfy_quant so labels are identical regardless
+        of which metadata source is used.
+        """
         fmt = meta.get("format", "unknown")
 
         if fmt == "int8_tensorwise":
             if meta.get("convrot"):
+                gs = meta.get("convrot_groupsize", 256)
                 layer_stats["int8_convrot"] += 1
-                return "INT8_CONVROT"
+                return f"INT8_CONVROT (GS:{gs})"
             layer_stats["int8"] += 1
             return "INT8"
 
         if fmt == "convrot_w4a4":
+            gs = meta.get("convrot_groupsize", 256)
+            qgs = meta.get("quant_group_size", 64)
             layer_stats["int4_convrot"] += 1
-            return "INT4_CONVROT"
+            return f"INT4_CONVROT (GS:{gs} QGS:{qgs})"
 
         if fmt == "nvfp4":
             layer_stats["nvfp4"] += 1
-            return "NVFP4"
+            gs = meta.get("group_size")
+            return f"NVFP4 (GS:{gs})" if gs else "NVFP4"
 
         if fmt == "mxfp8":
             layer_stats["mxfp8"] += 1
@@ -468,6 +527,19 @@ class StarModelLayersInfo:
             layer_stats["fp8"] += 1
             return "F8_E4M3"
 
+        if fmt == "awq_w4a16":
+            layer_stats["awq_w4a16"] += 1
+            gs = meta.get("group_size")
+            return f"AWQ_W4A16 (GS:{gs})" if gs else "AWQ_W4A16"
+
+        if fmt == "int4_cr":
+            if meta.get("backing") == "w4a4":
+                layer_stats["int4_cr_w4a4"] += 1
+                return "INT4_CR_W4A4"
+            layer_stats["int4_cr"] += 1
+            return "INT4_CR"
+
+        # Unknown custom format: expose its name verbatim
         layer_stats[fmt] += 1
         return fmt.upper()
 
@@ -533,8 +605,6 @@ class StarModelLayersInfo:
             qtype = tensor.tensor_type
             qtype_name = getattr(qtype, "name", str(qtype))
 
-            # GGML stores ne[] with ne[0] as fastest-varying, i.e. reversed
-            # relative to torch shape. ComfyUI's loader reverses it back.
             ggml_shape = tuple(int(v) for v in tensor.shape)
             torch_shape = tuple(reversed(ggml_shape))
 
@@ -615,7 +685,6 @@ class StarModelLayersInfo:
                 continue
 
             grouped = self._group_consecutive_layers(layers)
-
             total_size = sum(l['size'] for l in layers)
             formats = sorted(set(l['format'] for l in layers))
             formats_str = ", ".join(formats)
@@ -634,14 +703,12 @@ class StarModelLayersInfo:
                         f"│   ├── [{group['start']}-{group['end']}] "
                         f"({format_size(total_group_size)} | {group_formats_str})"
                     )
-
                     subcomponents = defaultdict(list)
                     for layer in group['layers']:
                         parts = layer['key'].split('.')
                         if len(parts) > 2:
                             component = '.'.join(parts[2:])
                             subcomponents[component].append(layer)
-
                     for comp_name in sorted(subcomponents.keys()):
                         comp_layers = subcomponents[comp_name]
                         comp_size = sum(l['size'] for l in comp_layers)
@@ -663,7 +730,6 @@ class StarModelLayersInfo:
     def _group_consecutive_layers(self, layers):
         numbered = []
         unnumbered = []
-
         for layer in layers:
             match = re.search(r'\.(\d+)\.', layer['key'])
             if match:
@@ -673,11 +739,10 @@ class StarModelLayersInfo:
                 unnumbered.append(layer)
 
         numbered.sort(key=lambda x: x[0])
-
         groups = []
+
         if numbered:
             current_group = [numbered[0]]
-
             for i in range(1, len(numbered)):
                 if numbered[i][0] == current_group[-1][0] + 1:
                     current_group.append(numbered[i])
@@ -741,16 +806,13 @@ class StarModelLayersInfo:
             },
             "layers": {},
         }
-
         for layer in layer_data:
             profile["layers"][layer["key"]] = layer["format"]
 
         profile_file = os.path.join(profiles_dir, f"{model_name}.json")
         print(f"📋 Saving quantization profile to: {profile_file}")
-
         with open(profile_file, "w", encoding="utf-8") as f:
             json.dump(profile, f, indent=2)
-
         return profile_file
 
 
