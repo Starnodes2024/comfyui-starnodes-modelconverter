@@ -1,3 +1,28 @@
+# ⭐ StarNodes Model Converter v1.5
+
+## 🆕 New Features
+
+*   **Star Model Layers Info Node**: Added a new dedicated analysis node (`⭐ Star Model Layers Info`) that inspects `.safetensors` and `.gguf` files to report per-layer quantization formats, parameter counts, and tensor sizes. Supports Normal View (flat list) and Tree View (hierarchical grouped view with layer ranges).
+*   **ConvRot Detection & Display**: The Layers Info node now correctly detects and displays ConvRot rotation metadata including group size (e.g., `INT8_CONVROT (GS:256)`) for both per-tensor `.comfy_quant` blobs and legacy global `_quantization_metadata` headers.
+*   **AIO Prefix Normalization**: The Layers Info analyzer now handles the `model.diffusion_model.` prefix mismatch between tensor keys and metadata keys. Metadata stored by the converter strips `AIO_MODEL_PREFIX`, so the analyzer tries stripping `model.diffusion_model.`, `diffusion_model.`, and `model.` (longest-first) plus suffix matching as a last resort.
+*   **Quantization Profile Export**: Added optional `save_profile` toggle to the Layers Info node that exports a layer-by-layer JSON profile compatible with Star Ultimate Model Converter Pro's profile import.
+*   **AWQ W4A16 Support**: Added full AWQ W4A16 quantization target format using comfy-kitchen's `TensorCoreAWQW4A16Layout` with asymmetric scale + zero-point storage and proper ComfyUI loader-compatible tensor naming (`_scale`, `_zero`).
+*   **W4A8 ConvRot Support**: Added W4A8 ConvRot target format using comfy-kitchen's `AsymW4A8Int8Layout` with configurable group size (16), ConvRot rotation (GS:256), codebook, and symmetric quantization. Includes robust suffix mapping for `s_rel`, `s_channel`, and `codebook` tensors.
+*   **SVDQuant W4A4**: Added SVDQuant W4A4 target format with configurable rank (8–512) and refinement iterations. Splits each weight into a low-rank BF16 branch + INT4 ConvRot residual branch with iterative error minimization.
+*   **Minimax-H3 Native Mix**: Added `minimax_h3_native_mix` target format implementing Minimax-H3's official mixed-precision recipe: INT8 ConvRot for `attn.qkv_proj`, NVFP4 for `mlp.fc1/fc2`, BF16 for boundary blocks and `attn.out_proj`.
+*   **Learned Rounding**: Added optional gradient-descent-based learned rounding for FP8 and INT8 ConvRot targets. Calibration-free (uses weight's own top-k SVD subspace), configurable iterations (10–5000), learning rate, and top-k ratio. Falls back gracefully to naive round-to-nearest on failure.
+*   **GGUF K-Quant Support**: Added GGUF K-quant target formats (`gguf_q3_k_s/m`, `gguf_q4_k_s/m`, `gguf_q5_k_s/m`, `gguf_q6_k`) via two-stage pipeline: intermediate F16/BF16 GGUF → llama.cpp `llama-quantize --pure`. Includes configurable `llama_quantize_bin` path and optional intermediate file retention.
+*   **Expanded Model Profiles**: Added 20+ new architecture profiles in `models.json`: YuE2, ACE-Step, Anima, Boogu-Image, Chroma, ERNIE-Image, Ideogram-4, Krea-2, Lens, LTX-2.5, Qwen-Image, Qwen-Image W4A8, **Qwen Image 2.1**, SeedVR, Z-Image, and 7 Minimax-H3 variants (ref_nvfp4_fp8, ref_nvfp4_int8convrot, int4_tensorwise_experimental, int8convrot_int4fc2, int8convrot_int4mlp, VAE, TE).
+
+## 🔧 Fixes & Improvements
+
+*   **Metadata Key Prefix Matching**: Fixed critical bug where the Layers Info analyzer could not match legacy metadata entries for AIO-converted models. The converter strips `model.diffusion_model.` when writing metadata keys, but the analyzer previously only tried exact match or stripping `model.`. Now uses ordered prefix stripping (`model.diffusion_model.` → `diffusion_model.` → `model.`) plus 3-segment suffix fallback.
+*   **Legacy Label Parity**: Fixed `_label_from_legacy_meta` to display group sizes (`GS:256`, `QGS:64`) and handle all format types (`awq_w4a16`, `int4_cr`, `nvfp4`, `mxfp8`) identically to `_label_from_comfy_quant`. Previously returned bare labels like `INT8_CONVROT` without group size info.
+*   **ConvRot Metadata Integrity**: Verified that `convrot: true` is only written to metadata when rotation actually succeeds. The native path uses a `convrot_used` flag gated by try/except; the comfy-kitchen path writes it only after successful `quantize()` call. Failed rotations fall back to unrotated INT8 or BF16 without false metadata.
+*   **Dequantization Safety**: Added input validation that rejects models containing lossless-incompatible formats (NVFP4, MXFP8, W4A4, AWQ W4A16, ConvRot-rotated INT8) when attempting to dequantize for re-conversion. Prevents silent quality degradation from double-quantization.
+*   **MXFP8 Backend Probing**: Added automatic backend selection for MXFP8 (`triton` → `eager` fallback) with runtime probing to avoid silent failures on incompatible GPU/driver combinations.
+*   **GGUF Architecture Validation**: Added hard validation against ComfyUI-GGUF's whitelisted architecture strings. Raises clear error if no confirmed mapping exists for the selected `model_type`, preventing loader rejection at load time.
+*   **Scale Tensor Storage Fix**: Fixed FP8 and learned-rounding INT8 paths to store scale tensors as BF16 (not FP32) for consistency with ComfyUI's loader expectations and reduced file size.
 # ⭐ Starnodes Model Converter v1.4.0
 
 ComfyUI custom nodes for converting, quantizing, analyzing, and managing diffusion models with advanced profile-based quantization.
