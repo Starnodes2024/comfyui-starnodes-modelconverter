@@ -324,6 +324,30 @@
       "nvfp4_group_size": null,
       "preserve_extended_metadata": true
     },
+    "Qwen-Image-2.1": {
+      "_note": "Qwen-Image 2.1 (released 2026-09-20). Architecturally distinct from the original Qwen-Image/Qwen-Image-Edit line -- single-stream DiT, 7.1B params, 32 transformer_blocks, bias-free, ONE shared modulation.1 layer (not per-stream img_mod/txt_mod), no vector_in/guidance_in/class_embedding. Blacklist verified against a real 265-tensor dump of qwen_image_2.1_bf16.safetensors (attn.norm_q/norm_k are 1-D and already auto-protected by this node's ndim==2 gate, no explicit entry needed). Officially shipped by Comfy-Org as bf16 and int8_convrot diffusion-model variants -- GGUF arch mapping intentionally NOT set here since this model is brand new and there is no confirmed evidence ComfyUI-GGUF's loader whitelist has been updated for its distinct tensor layout; do not assume the existing 'qwen_image' arch string applies.",
+      "blacklist": [
+        "img_in",
+        "modulation",
+        "norm_out",
+        "proj_out",
+        "time_text_embed",
+        "txt_in"
+      ],
+      "fp8_layers": [],
+      "force_int8_layers": [],
+      "awq_prescale_layers": [],
+      "pruned_extra_blacklist": [],
+      "int8_convrot_layers": [],
+      "int4_convrot_layers": [],
+      "keep_fp32": [],
+      "keep_fp16": [],
+      "w4a8_blacklist": [],
+      "w4a8_keep_fp32": [],
+      "w4a8_keep_fp16": [],
+      "nvfp4_group_size": null,
+      "preserve_extended_metadata": false
+    },
     "Qwen-Image": {
       "_note": "Groups Qwen-Image-Edit-2511 and 2512.",
       "blacklist": [
