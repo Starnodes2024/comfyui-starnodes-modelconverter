@@ -1,7 +1,8 @@
-# ⭐ StarNodes Model Converter v1.5
+# ⭐ StarNodes Model Converter v1.5.1
 
 ## 🆕 New Features
 
+*   **Star Checkpoint Saver (AIO) Saves model+clip+vae as one AIO checkpoint. Works with mixed quantizations (e.g. NVFP4 model + NVFP4 text encoder + BF16 VAE)
 *   **Star Model Layers Info Node**: Added a new dedicated analysis node (`⭐ Star Model Layers Info`) that inspects `.safetensors` and `.gguf` files to report per-layer quantization formats, parameter counts, and tensor sizes. Supports Normal View (flat list) and Tree View (hierarchical grouped view with layer ranges).
 *   **ConvRot Detection & Display**: The Layers Info node now correctly detects and displays ConvRot rotation metadata including group size (e.g., `INT8_CONVROT (GS:256)`) for both per-tensor `.comfy_quant` blobs and legacy global `_quantization_metadata` headers.
 *   **AIO Prefix Normalization**: The Layers Info analyzer now handles the `model.diffusion_model.` prefix mismatch between tensor keys and metadata keys. Metadata stored by the converter strips `AIO_MODEL_PREFIX`, so the analyzer tries stripping `model.diffusion_model.`, `diffusion_model.`, and `model.` (longest-first) plus suffix matching as a last resort.
