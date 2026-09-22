@@ -515,44 +515,56 @@ def learned_round_refine(
     target_dtype: e.g. torch.float8_e4m3fn or torch.int8
     Returns: refined weight tensor already cast to target_dtype
     """
-    device = weight_f32.device
-    m, n = weight_f32.shape
-    k = max(1, min(int(min(m, n) * topk_ratio), min(m, n)))
+    # ComfyUI runs node FUNCTION calls inside torch.inference_mode(), which
+    # permanently tags every tensor created there as a non-differentiable
+    # "inference tensor" -- requires_grad=True on such a tensor is silently
+    # defeated, so loss.backward() below would fail with "does not require
+    # grad and does not have a grad_fn" even though delta is explicitly
+    # created with requires_grad=True. Step out of inference_mode and clone
+    # the incoming tensors so this function's whole computation graph is
+    # built from ordinary (non-inference) tensors.
+    with torch.inference_mode(False), torch.enable_grad():
+        weight_f32 = weight_f32.clone()
+        scale = scale.clone()
 
-    with torch.no_grad():
-        try:
-            u, s, v = torch.svd_lowrank(weight_f32, q=min(k + 8, min(m, n)), niter=2)
-            u_k, vh_k = u[:, :k].contiguous(), v[:, :k].transpose(-2, -1).contiguous()
-        except Exception:
-            # Degenerate (all-zero / non-finite) tensor: no SVD subspace to
-            # project onto, so just return the naive rounding untouched.
-            return (weight_f32 * scale).round().clamp(
-                torch.finfo(target_dtype).min if target_dtype.is_floating_point else -128,
-                torch.finfo(target_dtype).max if target_dtype.is_floating_point else 127,
-            ).to(target_dtype)
+        device = weight_f32.device
+        m, n = weight_f32.shape
+        k = max(1, min(int(min(m, n) * topk_ratio), min(m, n)))
 
-        w_rounded = (weight_f32 * scale).round().to(target_dtype).to(torch.float32)
+        with torch.no_grad():
+            try:
+                u, s, v = torch.svd_lowrank(weight_f32, q=min(k + 8, min(m, n)), niter=2)
+                u_k, vh_k = u[:, :k].contiguous(), v[:, :k].transpose(-2, -1).contiguous()
+            except Exception:
+                # Degenerate (all-zero / non-finite) tensor: no SVD subspace to
+                # project onto, so just return the naive rounding untouched.
+                return (weight_f32 * scale).round().clamp(
+                    torch.finfo(target_dtype).min if target_dtype.is_floating_point else -128,
+                    torch.finfo(target_dtype).max if target_dtype.is_floating_point else 127,
+                ).to(target_dtype)
 
-    delta = torch.zeros_like(w_rounded, requires_grad=True)
-    optimizer = torch.optim.AdamW([delta], lr=lr)
+            w_rounded = (weight_f32 * scale).round().to(target_dtype).to(torch.float32)
 
-    best_loss = float("inf")
-    best_delta = torch.zeros_like(w_rounded)
+        delta = torch.zeros_like(w_rounded, requires_grad=True)
+        optimizer = torch.optim.AdamW([delta], lr=lr)
 
-    for _ in range(max(1, num_iter)):
-        optimizer.zero_grad()
-        dequant = (w_rounded + delta) / scale
-        error = dequant - weight_f32
-        projected_error = u_k.T @ error @ vh_k.T
-        loss = torch.linalg.norm(projected_error)
-        if not torch.isfinite(loss):
-            break
-        loss.backward()
-        optimizer.step()
-        loss_val = loss.item()
-        if loss_val < best_loss:
-            best_loss = loss_val
-            best_delta = delta.detach().clone()
+        best_loss = float("inf")
+        best_delta = torch.zeros_like(w_rounded)
+
+        for _ in range(max(1, num_iter)):
+            optimizer.zero_grad()
+            dequant = (w_rounded + delta) / scale
+            error = dequant - weight_f32
+            projected_error = u_k.T @ error @ vh_k.T
+            loss = torch.linalg.norm(projected_error)
+            if not torch.isfinite(loss):
+                break
+            loss.backward()
+            optimizer.step()
+            loss_val = loss.item()
+            if loss_val < best_loss:
+                best_loss = loss_val
+                best_delta = delta.detach().clone()
 
     with torch.no_grad():
         refined = (w_rounded + best_delta)
