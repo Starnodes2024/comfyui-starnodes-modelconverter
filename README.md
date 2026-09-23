@@ -1,4 +1,4 @@
-# ⭐ StarNodes Model Converter v1.5.1
+# ⭐ StarNodes Model Converter v1.5.2
 
 ## 🆕 New Features
 
@@ -16,7 +16,7 @@
 *   **Expanded Model Profiles**: Added 20+ new architecture profiles in `models.json`: YuE2, ACE-Step, Anima, Boogu-Image, Chroma, ERNIE-Image, Ideogram-4, Krea-2, Lens, LTX-2.5, Qwen-Image, Qwen-Image W4A8, **Qwen Image 2.1**, SeedVR, Z-Image, and 7 Minimax-H3 variants (ref_nvfp4_fp8, ref_nvfp4_int8convrot, int4_tensorwise_experimental, int8convrot_int4fc2, int8convrot_int4mlp, VAE, TE).
 
 ## 🔧 Fixes & Improvements
-
+*   2 new Text encoder profiles for maximum quality 
 *   **Metadata Key Prefix Matching**: Fixed critical bug where the Layers Info analyzer could not match legacy metadata entries for AIO-converted models. The converter strips `model.diffusion_model.` when writing metadata keys, but the analyzer previously only tried exact match or stripping `model.`. Now uses ordered prefix stripping (`model.diffusion_model.` → `diffusion_model.` → `model.`) plus 3-segment suffix fallback.
 *   **Legacy Label Parity**: Fixed `_label_from_legacy_meta` to display group sizes (`GS:256`, `QGS:64`) and handle all format types (`awq_w4a16`, `int4_cr`, `nvfp4`, `mxfp8`) identically to `_label_from_comfy_quant`. Previously returned bare labels like `INT8_CONVROT` without group size info.
 *   **ConvRot Metadata Integrity**: Verified that `convrot: true` is only written to metadata when rotation actually succeeds. The native path uses a `convrot_used` flag gated by try/except; the comfy-kitchen path writes it only after successful `quantize()` call. Failed rotations fall back to unrotated INT8 or BF16 without false metadata.
