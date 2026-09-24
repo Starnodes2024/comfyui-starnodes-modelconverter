@@ -248,6 +248,32 @@
       "fp8_layers": [],
       "preserve_extended_metadata": false
     },
+    "Ming-Image": {
+      "_note": "Ming-Image (inclusionAI/Ming-Image-0.1-Design, merged into ComfyUI core 2026-09-24, PR #16482). Built on the Z-Image/Lumina2 NextDiT codebase (class MingImage(Lumina2)) -- 30 main layers.N blocks + 2 noise_refiner blocks (both have adaLN_modulation, image-token path) + 2 context_refiner blocks (plain pre-norm, no modulation, text-token path). Blacklist verified exact-match against a real 519-tensor dump of ming_image_0.1_design_bf16.safetensors: every quantize-target (layers/noise_refiner/context_refiner attention.to_q/to_k/to_v/to_out.0 + feed_forward.w1/w2/w3) and every protect-target (all_x_embedder, all_final_layer, cap_embedder, t_embedder, adaLN_modulation, attention_norm1/2, ffn_norm1/2) checked by hand for substring collisions -- none found. This 'Design' checkpoint has NO MoE structure (plain dense w1/w2/w3 MLPs throughout) despite the PR description mentioning quantized MoE expert banks elsewhere in the Ming-Image family; do not assume this blacklist covers an MoE variant without re-verifying, since router/gate weights would need explicit protection and this profile has never seen one. Also does NOT cover: siglip_embedder (present in the image-edit variant, per PR's 'Support image edit'/'Multiple reference images' commits) or cap_pad_token/x_pad_token (present in the 'Layer' variant per the PR's own model_detection.py comment: 'Design ships without the learned pad tokens; Layer has them'). Deliberately does not use a bare 'attention' blacklist entry -- that would wrongly catch attention.to_q/to_k/to_v/to_out.0 themselves, not just the norm sublayers (an existing bug carried in this file's Z-Image profile, left unfixed there but not repeated here). GGUF arch mapping intentionally NOT set -- merged same-day, no evidence any ComfyUI-GGUF fork's IMG_ARCH_LIST has caught up yet.",
+      "blacklist": [
+        "bias",
+        "adaLN_modulation",
+        "final_layer",
+        "x_embedder",
+        "cap_embedder",
+        "t_embedder",
+        "attention_norm",
+        "ffn_norm"
+      ],
+      "fp8_layers": [],
+      "force_int8_layers": [],
+      "awq_prescale_layers": [],
+      "pruned_extra_blacklist": [],
+      "int8_convrot_layers": [],
+      "int4_convrot_layers": [],
+      "keep_fp32": [],
+      "keep_fp16": [],
+      "w4a8_blacklist": [],
+      "w4a8_keep_fp32": [],
+      "w4a8_keep_fp16": [],
+      "nvfp4_group_size": null,
+      "preserve_extended_metadata": false
+    },
     "Lens": {
       "_note": "'txt' skips ALL text matrices to avoid the amax() numel==0 error with empty prompts.",
       "blacklist": [
