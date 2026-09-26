@@ -375,6 +375,36 @@
       "nvfp4_group_size": null,
       "preserve_extended_metadata": false
     },
+    "Qwen-Image-2.1 MaxQ": {
+      "_note": "MaxQ v2: global Q/K -- optimized allocation replacing the block-based heuristic. Protects attn.to_q/to_k/to_out and img_mlp.out across ALL 32 blocks (the softmax and residual-injection paths), plus attn.to_v at blocks 0 and 31. Leaves gate_up (lowest sensitivity) quantized everywhere. Cost: +2.98 GiB over base int8_convrot (~9.7 GB total), fitting the 3 GB headroom. Verified against 265-tensor dump.",
+      "blacklist": [
+        "img_in",
+        "modulation",
+        "norm_out",
+        "proj_out",
+        "time_text_embed",
+        "txt_in",
+        "attn.to_q",
+        "attn.to_k",
+        "attn.to_out",
+        "img_mlp.out",
+        "transformer_blocks.0.attn.to_v",
+        "transformer_blocks.31.attn.to_v"
+      ],
+      "fp8_layers": [],
+      "force_int8_layers": [],
+      "awq_prescale_layers": [],
+      "pruned_extra_blacklist": [],
+      "int8_convrot_layers": [],
+      "int4_convrot_layers": [],
+      "keep_fp32": [],
+      "keep_fp16": [],
+      "w4a8_blacklist": [],
+      "w4a8_keep_fp32": [],
+      "w4a8_keep_fp16": [],
+      "nvfp4_group_size": null,
+      "preserve_extended_metadata": false
+    },
     "Qwen-Image": {
       "_note": "Groups Qwen-Image-Edit-2511 and 2512.",
       "blacklist": [
@@ -1053,6 +1083,42 @@
       "w4a8_keep_fp16": [],
       "nvfp4_group_size": null,
       "preserve_extended_metadata": true
+    },
+    "Z-Image MaxQ": {
+      "_note": "Max Quality profile. Protects all attention, all noise/context refiners, all feed_forward.w2 (down projections), and blocks 0-9 / 25-29 entirely. Only w1/w3 in the middle 15 blocks are quantized (~25% of linear weights) -- file stays near BF16 size, expect roughly 10-20% VRAM savings, not 12 GB.",
+      "blacklist": [
+        "attention",
+        "adaLN_modulation",
+        "norm",
+        "final_layer",
+        "cap_embedder",
+        "x_embedder",
+        "noise_refiner",
+        "context_refiner",
+        "t_embedder",
+        "cap_pad_token",
+        "x_pad_token",
+        "clip_text_pooled_proj",
+        "time_text_embed",
+        "feed_forward.w2",
+        "layers.0.",
+        "layers.1.",
+        "layers.2.",
+        "layers.3.",
+        "layers.4.",
+        "layers.5.",
+        "layers.6.",
+        "layers.7.",
+        "layers.8.",
+        "layers.9.",
+        "layers.25.",
+        "layers.26.",
+        "layers.27.",
+        "layers.28.",
+        "layers.29."
+      ],
+      "fp8_layers": [],
+      "preserve_extended_metadata": false
     }
   }
 }
