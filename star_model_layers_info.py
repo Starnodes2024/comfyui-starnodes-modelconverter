@@ -237,9 +237,29 @@ class StarModelLayersInfo:
 
         # -- Resolve input path -----------------------------------------
         if use_file_path and file_path.strip():
+            # [SECURITY PATCH] path traversal guard v2
             input_path = os.path.abspath(
                 os.path.expanduser(file_path.strip().strip('"'))
             )
+            allowed_dirs = []
+            for _fps in folder_paths.folder_names_and_paths.values():
+                allowed_dirs.extend([os.path.abspath(p) for p in _fps[0]])
+            allowed_dirs.append(os.path.abspath(os.path.dirname(folder_paths.__file__)))
+            _p = os.path.normcase(os.path.abspath(input_path))
+            is_allowed = False
+            for _d in allowed_dirs:
+                if not _d:
+                    continue
+                _b = os.path.normcase(os.path.abspath(_d))
+                if _p == _b or _p.startswith(_b + os.sep):
+                    is_allowed = True
+                    break
+            if not is_allowed:
+                raise ValueError(
+                    f"Security Error: path '{input_path}' is outside all registered "
+                    "ComfyUI folders. Use a path inside your ComfyUI model/input/output "
+                    "directories (or a folder added via extra_model_paths.yaml)."
+                )
             if not os.path.isfile(input_path):
                 raise ValueError(f"File not found: {input_path}")
             source_desc = "custom path"

@@ -295,6 +295,27 @@ def resolve_input(mode, diffusion_model, checkpoint, text_encoder, custom_path, 
             raise ValueError("Mode is 'Custom Path' but no custom path was provided.")
 
         src = os.path.abspath(os.path.expanduser(custom_path))
+        # [SECURITY PATCH] path traversal guard v3
+        allowed_dirs = []
+        for _fps in folder_paths.folder_names_and_paths.values():
+            allowed_dirs.extend([os.path.abspath(p) for p in _fps[0]])
+        allowed_dirs.append(os.path.abspath(os.path.dirname(folder_paths.__file__)))
+        def _star_within(_p):
+            _p = os.path.normcase(os.path.abspath(_p))
+            for _d in allowed_dirs:
+                if not _d:
+                    continue
+                _b = os.path.normcase(os.path.abspath(_d))
+                if _p == _b or _p.startswith(_b + os.sep):
+                    return True
+            return False
+        _star_parent = os.path.dirname(src)
+        if not (_star_within(src) or (os.path.isdir(_star_parent) and _star_within(_star_parent))):
+            raise ValueError(
+                f"Security Error: custom path '{src}' is outside all registered "
+                "ComfyUI folders. Use a path inside your ComfyUI model/input/output "
+                "directories (or a folder added via extra_model_paths.yaml)."
+            )
 
         if os.path.isdir(src):
             files = sorted(glob.glob(os.path.join(src, "*.safetensors")))
