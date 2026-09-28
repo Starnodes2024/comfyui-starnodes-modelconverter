@@ -1,5 +1,9 @@
 """Star Model Layers Info - Analyze and report layer quantization information.
 
+Reads diffusion models (models/diffusion_models) and text encoders
+(models/text_encoders, plus the legacy models/clip and ComfyUI-GGUF's
+clip_gguf), or any file via a custom path.
+
 Supports:
   .safetensors (native, FP8, INT8, INT8 ConvRot, NVFP4, MXFP8, W4A4, AWQ, ...)
   .gguf        (all GGML quant types, plus custom Q8_CR / Q4_CR_W4A4 metadata
@@ -88,7 +92,22 @@ _KEY_PREFIXES = [
 ]
 
 # Folders to search for models, in order of preference.
-MODEL_FOLDERS = ("diffusion_models", "unet_gguf", "unet")
+#
+# Diffusion-model folders come first so name resolution behaves exactly as it
+# did before text-encoder support was added. "unet" / "clip" are the legacy
+# aliases of diffusion_models / text_encoders (kept for older ComfyUI installs;
+# on newer ones they resolve to the same directories and are de-duplicated).
+# "unet_gguf" / "clip_gguf" are registered by ComfyUI-GGUF.
+MODEL_FOLDERS = (
+    "diffusion_models", "unet_gguf", "unet",
+    "text_encoders", "clip", "clip_gguf",
+)
+TEXT_ENCODER_FOLDERS = ("text_encoders", "clip", "clip_gguf")
+
+
+def _folder_label(folder_key):
+    """Human-readable category for the folder a model was found in."""
+    return "text encoder" if folder_key in TEXT_ENCODER_FOLDERS else "diffusion model"
 
 
 def format_size(num_bytes):
@@ -115,7 +134,12 @@ class StarModelLayersInfo:
         return {
             "required": {
                 "model_name": (s._list_model_files(), {
-                    "tooltip": "Diffusion model file. Both .safetensors and .gguf are listed."
+                    "tooltip": (
+                        "Diffusion model or text encoder file (diffusion_models and "
+                        "text_encoders folders). Both .safetensors and .gguf are listed. "
+                        "If the same filename exists in both, the diffusion_models copy "
+                        "is used - use 'Use File Path' to pick the other."
+                    )
                 }),
             },
             "optional": {
@@ -161,17 +185,46 @@ class StarModelLayersInfo:
                 continue
         return sorted(names)
 
-    def _resolve_model_path(self, model_name):
+    def _resolve_model_source(self, model_name):
+        """Return (full_path, folder_key) for a dropdown entry.
+
+        The first folder in MODEL_FOLDERS that contains the name wins. Legacy
+        aliases (unet/clip) point at the same directories as their modern
+        counterparts, so matches are de-duplicated by real path before
+        deciding whether a filename is genuinely ambiguous.
+        """
+        matches = []  # (path, folder_key), first-seen order, unique real paths
+        seen = set()
         for key in MODEL_FOLDERS:
             try:
                 p = folder_paths.get_full_path(key, model_name)
-                if p:
-                    return p
             except Exception:
                 continue
-        raise ValueError(
-            f"Model not found in any of {MODEL_FOLDERS}: {model_name}"
-        )
+            if not p:
+                continue
+            real = os.path.normcase(os.path.realpath(p))
+            if real in seen:
+                continue
+            seen.add(real)
+            matches.append((p, key))
+
+        if not matches:
+            raise ValueError(
+                f"Model not found in any of {MODEL_FOLDERS}: {model_name}"
+            )
+
+        if len(matches) > 1:
+            others = ", ".join(f"{k} ({p})" for p, k in matches[1:])
+            print(
+                f"⚠️ [Star Model Layers Info] '{model_name}' exists in more than "
+                f"one location; using {matches[0][1]} ({matches[0][0]}). "
+                f"Also found in: {others}. Enable 'Use File Path' to analyze a "
+                f"specific copy."
+            )
+        return matches[0]
+
+    def _resolve_model_path(self, model_name):
+        return self._resolve_model_source(model_name)[0]
 
     # ------------------------------------------------------------------
     # Entry point
@@ -189,8 +242,10 @@ class StarModelLayersInfo:
             )
             if not os.path.isfile(input_path):
                 raise ValueError(f"File not found: {input_path}")
+            source_desc = "custom path"
         else:
-            input_path = self._resolve_model_path(model_name)
+            input_path, source_key = self._resolve_model_source(model_name)
+            source_desc = f"{source_key} ({_folder_label(source_key)})"
 
         base_name = os.path.splitext(os.path.basename(input_path))[0]
         input_bytes = os.path.getsize(input_path)

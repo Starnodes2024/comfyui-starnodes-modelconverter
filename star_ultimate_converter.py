@@ -2179,9 +2179,15 @@ class StarUltimateModelConverter:
                     elif target_format == "mxfp8":
                         layout = TensorCoreMXFP8Layout
                         fmt_name = "mxfp8"
-                    else:
+                    elif target_format == "nvfp4":
                         layout = TensorCoreNVFP4Layout
                         fmt_name = "nvfp4"
+                    else:
+                        raise ValueError(
+                            f"Unhandled target_format '{target_format}' reached the generic "
+                            "quantization fallback. Refusing to silently quantize to NVFP4 -- "
+                            "this catch-all is what produced NVFP4 layers inside w4a8_convrot files."
+                        )
 
                     print(f"💎 {target_format.upper()}: {k}")
 
@@ -2258,6 +2264,14 @@ class StarUltimateModelConverter:
                         new_sd[k] = v
                         counts["kept"] += 1
 
+        if is_w4a8 and any(
+            conf.get("format") == "nvfp4" for conf in quant_map["layers"].values()
+        ):
+            raise RuntimeError(
+                "W4A8 target selected but NVFP4 layers were produced -- layers escaped the "
+                "W4A8 path into the generic fallback. Aborting instead of writing a broken "
+                "file. Check the target_format string and the W4A8 block above."
+            )
         new_sd = {k: v for k, v in new_sd.items() if not k.endswith(".comfy_quant")}
 
         final_metadata = OrderedDict()
