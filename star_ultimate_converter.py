@@ -85,6 +85,7 @@ TARGET_FORMATS = [
     "w4a8_convrot",
     "w4a8_convrot_pruned",
     "w6a8_convrot",
+    "w6a8_convrot_pruned",
     "awq_w4a16",
     "w4a4",
     "minimax_h3_native_mix",
@@ -148,7 +149,8 @@ GGUF_TXT_ARCH_LIST = {
 MODEL_TYPE_TO_GGUF_ARCH = {
     "Chroma": "flux",
     "Flux1 / Flux2": "flux",
-    "Flux2 Tight (W4A8 Full)": "flux",
+    "Flux 2 Tight": "flux",
+    "Flux 2 Tight (W6A8 Pruned)": "flux",
     "Ideogram-4": "ideogram",
     "Krea-2": "krea2",
     "LTX-Video (All Versions)": "ltxv",
@@ -216,7 +218,7 @@ PRECISION_RE = re.compile(
     r"fp32|fp16|bf16|mxfp8|"
     r"fp8(?:_e[45]m[23](?:fn)?)(?:_scaled)?(?:_fast)?|"
     r"int[48](?:_convrot)?(?:_tensorwise)?(?:_pruned)?|"
-    r"w4a8(?:_convrot)?(?:_pruned)?|"
+    r"w[46]a8(?:_convrot)?(?:_pruned)?|"
     r"awq_w4a16|"
     r"nvfp4|svdquant_w4a4|w4a4"
     r")(?=[-_.]|$)",
@@ -1348,7 +1350,7 @@ class StarUltimateModelConverter:
 
         is_pruned_format = target_format.endswith("_pruned")
         is_w4a8 = target_format in ("w4a8_convrot", "w4a8_convrot_pruned")
-        is_w6a8 = target_format == "w6a8_convrot"
+        is_w6a8 = target_format in ("w6a8_convrot", "w6a8_convrot_pruned")
         is_awq_w4a16 = target_format == "awq_w4a16"
         is_w4a4 = target_format == "w4a4"
         is_gguf = target_format in GGUF_TARGET_FORMATS

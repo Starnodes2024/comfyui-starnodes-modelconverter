@@ -177,8 +177,8 @@
         "txt_mlp"
       ]
     },
-    "Flux2 Tight (W4A8 Full)": {
-      "_note": "Aggressive W4A8. ALL linear layers quantized including MLPs. ~20-22GB. Smaller but may lose fine detail/text rendering.",
+    "Flux 2 Tight": {
+      "_note": "Aggressive Tight recipe (renamed from 'Flux2 Tight (W4A8 Full)'). ALL linear layers quantized including MLPs when the target is w4a8_convrot or w6a8_convrot (~20-22 GB at W4A8). Smaller but may lose fine detail/text rendering. For the 6-bit recipe that keeps the MLP stacks in FP16, use 'Flux 2 Tight (W6A8 Pruned)' with target w6a8_convrot_pruned.",
       "blacklist": [
         "bias",
         "txt_attn",
