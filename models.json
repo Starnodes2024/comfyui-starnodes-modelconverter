@@ -199,29 +199,46 @@
       "w4a8_keep_fp32": [],
       "w4a8_keep_fp16": []
     },
-    "Flux 3 Image Small": {
-      "_note": "Flux 3 Image Small (f3-image-small), 3072-wide DiT. Separate q/k/v/attn_out/mlp_in/mlp_out per block across single_blocks (28), content_mode_blocks.image / image_cond (5 each) and txt_mode_blocks (5). Protected: emb_in and final_layer (128-dim, too narrow for ConvRot groupsize 256), time_in, txt_in, both *_stream_modulations groups (~170M params, cheap to keep) and norm scales. Layout derived from the tensor listing only, not yet validated with a real conversion. GGUF arch intentionally NOT set -- tensor layout (content_mode_blocks / txt_mode_blocks) matches no known ComfyUI-GGUF arch.",
+"Flux 3 Klein": {
+      "_note": "Flux 3 Klein (5.5B). Architecturally distinct from Flux 1/2. Protects emb_in (patch embedder), early_stream_modulations, and standard Flux sensitive layers. For W4A8, keeps mlp_in/mlp_out in FP16 to preserve fidelity.",
       "blacklist": [
+        "bias",
+        "txt_in",
+        "time_in",
         "emb_in",
         "final_layer",
-        "time_in",
+        "single_stream_modulation",
+        "early_stream_modulation"
+      ],
+      "w4a8_blacklist": [
+        "mlp_in",
+        "mlp_out"
+      ],
+      "w4a8_keep_fp16": [
+        "mlp_in",
+        "mlp_out"
+      ]
+    },
+    "Flux 3 Klein MaxQ": {
+      "_note": "Maximum-fidelity INT8 MaxQ profile for Flux 3 Klein (5.5B). Protects all attention projections (q_proj/k_proj/v_proj/attn_out) and MLP down-projections (mlp_out) across all 43 blocks -- the softmax path, residual injection, and error-accumulation point -- plus all embeddings, modulations and the final layer. Only the MLP up/gate expansion (mlp_in, ~108 MB/block, biggest and least quantization-sensitive tensor) stays quantized. Verified against the official 357-tensor flux3_image_klein_bf16.safetensors dump: q_proj/k_proj/v_proj/attn_out/mlp_out each match only their intended *.weight tensors, no substring collisions with block-index paths (single_blocks.0. does NOT match single_blocks.10.). Expected ~8.05 GB at int8_convrot vs 10.32 GB BF16 (~22% savings).",
+      "blacklist": [
+        "bias",
         "txt_in",
-        "modulation",
-        "norm"
+        "time_in",
+        "emb_in",
+        "final_layer",
+        "single_stream_modulation",
+        "early_stream_modulation",
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "attn_out",
+        "mlp_out"
       ],
       "fp8_layers": [],
       "force_int8_layers": [],
       "awq_prescale_layers": [],
-      "pruned_extra_blacklist": [
-        "single_blocks.0.",
-        "single_blocks.27.",
-        "content_mode_blocks.image.0.",
-        "content_mode_blocks.image_cond.0.",
-        "content_mode_blocks.image.4.",
-        "content_mode_blocks.image_cond.4.",
-        "txt_mode_blocks.0.",
-        "txt_mode_blocks.4."
-      ],
+      "pruned_extra_blacklist": [],
       "int8_convrot_layers": [],
       "int4_convrot_layers": [],
       "keep_fp32": [],
@@ -229,7 +246,6 @@
       "w4a8_blacklist": [],
       "w4a8_keep_fp32": [],
       "w4a8_keep_fp16": [],
-      "awq_w4a16_layers": [],
       "nvfp4_group_size": null,
       "preserve_extended_metadata": false
     },
@@ -524,6 +540,46 @@
         "vid_in",
         "vid_out",
         "emb_in"
+      ],
+      "fp8_layers": [],
+      "preserve_extended_metadata": false
+    },
+    "SeedVR MaxQ": {
+      "_note": "SeedVR MaxQ v1 -- maximum-fidelity int8_convrot variant of 'SeedVR (All Versions)'. Superset of the base blacklist PLUS globally: fused per-stream attn.proj_qkv (the softmax path; vid stream was already base-protected, txt stream is the MaxQ addition), attention out-projections (residual injection, naming-variant covered), and MLP down-projections (w2/fc2/linear2/down_proj -- where quantization error accumulates most). MLP up/gate (w1/w3/fc1) stay quantized; NO full-block freezes (block freezing wastes budget on gate/up matrices -- lesson from Qwen-Image-2.1 MaxQ v2). Block-index-free by design, so valid for SeedVR v1/v2 and any block count. Expected ~10.5-11.5 GB for the 7B model vs ~7.8-8.0 GB base and 15.35 GB FP16. Verify with Star Model Layers Info: mlp down-proj and attn.proj_qkv.txt rows must read BF16; if they show INT8_CONVROT, the real tensor names use a different suffix -- report them and extend ADDITIONS.",
+      "blacklist": [
+        "bias",
+        "norm",
+        "scale",
+        "final_layer",
+        "proj_out",
+        "pos_emb",
+        "neg_emb",
+        "patch_embed",
+        "pos_embed",
+        "x_embedder",
+        "t_embedder",
+        "context_embedder",
+        "y_embedder",
+        "time_in",
+        "vector_in",
+        "guidance_in",
+        "txt_in",
+        "img_in",
+        "single_stream_modulation",
+        "double_stream_modulation",
+        "vae",
+        "attn.proj_qkv.vid",
+        "vid_in",
+        "vid_out",
+        "emb_in",
+        "attn.proj_qkv",
+        "attn.proj_out",
+        "attn.out.",
+        "attn.out_proj",
+        "mlp.w2",
+        "mlp.fc2",
+        "mlp.linear2",
+        "mlp.down_proj"
       ],
       "fp8_layers": [],
       "preserve_extended_metadata": false
