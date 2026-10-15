@@ -199,6 +199,40 @@
       "w4a8_keep_fp32": [],
       "w4a8_keep_fp16": []
     },
+    "Flux 3 Image Small": {
+      "_note": "Flux 3 Image Small (f3-image-small), 3072-wide DiT. Separate q/k/v/attn_out/mlp_in/mlp_out per block across single_blocks (28), content_mode_blocks.image / image_cond (5 each) and txt_mode_blocks (5). Protected: emb_in and final_layer (128-dim, too narrow for ConvRot groupsize 256), time_in, txt_in, both *_stream_modulations groups (~170M params, cheap to keep) and norm scales. Layout derived from the tensor listing only, not yet validated with a real conversion. GGUF arch intentionally NOT set -- tensor layout (content_mode_blocks / txt_mode_blocks) matches no known ComfyUI-GGUF arch.",
+      "blacklist": [
+        "emb_in",
+        "final_layer",
+        "time_in",
+        "txt_in",
+        "modulation",
+        "norm"
+      ],
+      "fp8_layers": [],
+      "force_int8_layers": [],
+      "awq_prescale_layers": [],
+      "pruned_extra_blacklist": [
+        "single_blocks.0.",
+        "single_blocks.27.",
+        "content_mode_blocks.image.0.",
+        "content_mode_blocks.image_cond.0.",
+        "content_mode_blocks.image.4.",
+        "content_mode_blocks.image_cond.4.",
+        "txt_mode_blocks.0.",
+        "txt_mode_blocks.4."
+      ],
+      "int8_convrot_layers": [],
+      "int4_convrot_layers": [],
+      "keep_fp32": [],
+      "keep_fp16": [],
+      "w4a8_blacklist": [],
+      "w4a8_keep_fp32": [],
+      "w4a8_keep_fp16": [],
+      "awq_w4a16_layers": [],
+      "nvfp4_group_size": null,
+      "preserve_extended_metadata": false
+    },
     "Ideogram-4": {
       "_note": "Diffusion Transformer using flow matching. Crucial to preserve embedding, output mapping, QK-RMSNorm, and modulation layers to maintain INT4 quality.",
       "blacklist": [
