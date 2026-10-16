@@ -199,7 +199,7 @@
       "w4a8_keep_fp32": [],
       "w4a8_keep_fp16": []
     },
-"Flux 3 Klein": {
+    "Flux 3 Klein": {
       "_note": "Flux 3 Klein (5.5B). Architecturally distinct from Flux 1/2. Protects emb_in (patch embedder), early_stream_modulations, and standard Flux sensitive layers. For W4A8, keeps mlp_in/mlp_out in FP16 to preserve fidelity.",
       "blacklist": [
         "bias",
@@ -1208,6 +1208,61 @@
         "layers.29."
       ],
       "fp8_layers": [],
+      "preserve_extended_metadata": false
+    },
+    "MOSS-Image": {
+      "_note": "Covers both MOSS-Image-Base and MOSS-Image-SFT (Comfy-Org). The SFT checkpoint is a supervised fine-tune of Base but shares the exact same tensor names, shapes, and precision layout -- verified against the Comfy-Org moss_image_sft_bf16.safetensors tensor listing. Standard INT8 ConvRot recipe matching the official Abiray/XCEED123 Comfy-Org quantization: all 252 block linears (layers.N.proj.{qkv,o,ffn_up_gate,ffn_down}) are quantized; embedders, modulation, final layers, norms, RoPE bands, and the text_embedder stay in original BF16/FP32. Expected ~5.0-5.4 GB at int8_convrot vs 9.47 GB BF16.",
+      "blacklist": [
+        "bias",
+        "norm",
+        "modulation",
+        "embedder",
+        "time_embedding",
+        "final_",
+        "rope"
+      ],
+      "fp8_layers": [],
+      "force_int8_layers": [],
+      "awq_prescale_layers": [],
+      "pruned_extra_blacklist": [],
+      "int8_convrot_layers": [],
+      "int4_convrot_layers": [],
+      "keep_fp32": [],
+      "keep_fp16": [],
+      "w4a8_blacklist": [],
+      "w4a8_keep_fp32": [],
+      "w4a8_keep_fp16": [],
+      "nvfp4_group_size": null,
+      "preserve_extended_metadata": false
+    },
+    "MOSS-Image MaxQ": {
+      "_note": "Covers both MOSS-Image-Base and MOSS-Image-SFT (Comfy-Org); SFT shares the exact tensor layout of Base. Maximum-fidelity INT8 ConvRot variant following the SeedVR MaxQ pattern: protects the full softmax path (proj.qkv), residual injection (proj.o), and MLP down-projections (proj.ffn_down) across ALL 42 layers -- the three groups where quantization error compounds most -- plus freezes layers 0 and 41 entirely (matching the official Abiray/XCEED123 'Layer 0 & 41 in BF16' safeguard). Only proj.ffn_up_gate in the middle 40 layers is quantized. All non-block components (text_embedder, modulation, embedders, final layers, norms, RoPE) stay BF16/FP32. Expected ~7.6 GB at int8_convrot vs 9.47 GB BF16.",
+      "blacklist": [
+        "bias",
+        "norm",
+        "modulation",
+        "embedder",
+        "time_embedding",
+        "final_",
+        "rope",
+        "proj.qkv",
+        "proj.o",
+        "proj.ffn_down",
+        "layers.0.",
+        "layers.41."
+      ],
+      "fp8_layers": [],
+      "force_int8_layers": [],
+      "awq_prescale_layers": [],
+      "pruned_extra_blacklist": [],
+      "int8_convrot_layers": [],
+      "int4_convrot_layers": [],
+      "keep_fp32": [],
+      "keep_fp16": [],
+      "w4a8_blacklist": [],
+      "w4a8_keep_fp32": [],
+      "w4a8_keep_fp16": [],
+      "nvfp4_group_size": null,
       "preserve_extended_metadata": false
     }
   }
