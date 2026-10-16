@@ -150,7 +150,6 @@ MODEL_TYPE_TO_GGUF_ARCH = {
     "Chroma": "flux",
     "Flux1 / Flux2": "flux",
     "Flux 2 Tight": "flux",
-    "Flux 2 Tight (W6A8 Pruned)": "flux",
     "Ideogram-4": "ideogram",
     "Krea-2": "krea2",
     "LTX-Video (All Versions)": "ltxv",
@@ -321,9 +320,34 @@ def resolve_input(mode, diffusion_model, checkpoint, text_encoder, custom_path, 
 
         if os.path.isdir(src):
             files = sorted(glob.glob(os.path.join(src, "*.safetensors")))
-            if not files:
-                raise ValueError(f"No .safetensors files found in: {src}")
-            return files, os.path.dirname(src), os.path.basename(src)
+            if files:
+                return files, os.path.dirname(src), os.path.basename(src)
+
+            # No safetensors shards found -- look for a single pickle-format
+            # checkpoint (.pth/.pt/.ckpt) instead. Unlike safetensors shards,
+            # multiple matches here are NOT safely mergeable as "parts of one
+            # model" (e.g. a repo folder with a separate VAE .pth alongside
+            # a separate DiT .pth) -- refuse rather than silently combining
+            # unrelated checkpoints into one broken state dict.
+            pickle_files = sorted(
+                glob.glob(os.path.join(src, "*.pth"))
+                + glob.glob(os.path.join(src, "*.pt"))
+                + glob.glob(os.path.join(src, "*.ckpt"))
+            )
+            if len(pickle_files) == 1:
+                fp = pickle_files[0]
+                return [fp], os.path.dirname(fp), os.path.splitext(os.path.basename(fp))[0]
+            if len(pickle_files) > 1:
+                names = ", ".join(os.path.basename(f) for f in pickle_files)
+                raise ValueError(
+                    f"Found {len(pickle_files)} .pth/.pt/.ckpt files in {src} ({names}) -- "
+                    "these are not safely assumed to be shards of one model (unlike "
+                    ".safetensors shards). Point Custom Path directly at the one specific "
+                    "file you want to convert instead of this folder."
+                )
+            raise ValueError(
+                f"No .safetensors, .pth, .pt, or .ckpt files found in: {src}"
+            )
 
         if os.path.isfile(src):
             return [src], os.path.dirname(src), os.path.splitext(os.path.basename(src))[0]
@@ -392,6 +416,38 @@ def load_aio_model(checkpoint_name):
         )
 
     return sd, ckpt_path
+
+
+def pick_nvfp4_backend(device):
+    """Probe NVFP4 quantization once and pick a backend that actually works.
+
+    comfy-kitchen dispatches quantize_nvfp4 hip -> cuda -> triton -> eager and
+    does not fall back when a backend raises. ROCm has no HIP NVFP4 kernel, so
+    dispatch lands on the Triton kernel (NVIDIA inline PTX), which cannot be
+    compiled for AMD GPUs. Returns None if the default backend works, otherwise
+    the name of a backend that does.
+    """
+    if not KITCHEN_AVAILABLE or TensorCoreNVFP4Layout is None:
+        raise RuntimeError("NVFP4 requires comfy-kitchen TensorCoreNVFP4Layout.")
+    probe = torch.randn(32, 32, device=device, dtype=torch.float32)
+    try:
+        TensorCoreNVFP4Layout.quantize(probe)
+        return None
+    except Exception as e:
+        first_line = (str(e).splitlines() or [""])[0][:160]
+        print(f"⚠️ NVFP4 default backend failed ({first_line}). Trying fallback backends...")
+        for backend in ("triton", "eager"):
+            try:
+                with ck.use_backend(backend):
+                    TensorCoreNVFP4Layout.quantize(probe)
+                print(f"✅ NVFP4: using '{backend}' backend")
+                return backend
+            except Exception:
+                continue
+    raise RuntimeError(
+        "NVFP4 quantization failed on every comfy_kitchen backend in this environment. "
+        "Try converting with device=cpu, or update comfy-kitchen."
+    )
 
 
 def pick_mxfp8_backend(device):
@@ -717,15 +773,32 @@ def load_input(files):
         if len(files) > 1:
             print(f"📦 Loading shard {i + 1}/{len(files)}: {os.path.basename(fp)}")
 
-        part = comfy.utils.load_torch_file(fp, safe_load=True)
+        try:
+            part = comfy.utils.load_torch_file(fp, safe_load=True)  # [PTH-FIX] pickle-aware load_input
+        except Exception as _e:
+            if fp.lower().endswith((".pth", ".pt", ".ckpt")):
+                print(f"⚠️ weights_only load failed for {os.path.basename(fp)} ({_e}); retrying with full unpickling.")
+                part = comfy.utils.load_torch_file(fp, safe_load=False)
+            else:
+                raise
+        for _nk in [_k for _k in part if not isinstance(part[_k], torch.Tensor)]:
+            print(f"⚠️ Skipping non-tensor entry '{_nk}' ({type(part[_nk]).__name__}) in {os.path.basename(fp)}")
+            del part[_nk]
         for k in part:
             if k in sd:
                 print(f"⚠️ Duplicate key '{k}' in {os.path.basename(fp)}, overwriting")
         sd.update(part)
 
-    with safetensors.safe_open(files[0], framework="pt") as f:
-        orig_meta = f.metadata()
-
+    # [PTH-VAE-FIX] guard safetensors metadata read for pickle (.pth/.pt/.ckpt) inputs
+    orig_meta = None
+    if files[0].lower().endswith((".safetensors", ".sft")):
+        try:
+            with safetensors.safe_open(files[0], framework="pt") as f:
+                orig_meta = f.metadata()
+        except Exception as e:
+            print(f"⚠️ Could not read safetensors metadata from {os.path.basename(files[0])}: {e}")
+    else:
+        print(f"🧪 Pickle source detected ({os.path.basename(files[0])}) -- skipping safetensors metadata read.")
     return sd, orig_meta
 
 
@@ -1558,6 +1631,7 @@ class StarUltimateModelConverter:
         print(f"⚙️ Converting on: {device}")
 
         mxfp8_backend = pick_mxfp8_backend(device) if target_format == "mxfp8" else None
+        nvfp4_backend = pick_nvfp4_backend(device) if target_format in ("nvfp4", "minimax_h3_native_mix") else None
 
         if target_format in ("fp16", "fp32"):
             target_dtype = torch.float16 if target_format == "fp16" else torch.float32
@@ -1984,7 +2058,11 @@ class StarUltimateModelConverter:
                             try:
                                 v_tensor_ready = v_tensor.float().contiguous()
 
-                                qdata, params = TensorCoreNVFP4Layout.quantize(v_tensor_ready)
+                                if nvfp4_backend is not None:
+                                    with ck.use_backend(nvfp4_backend):
+                                        qdata, params = TensorCoreNVFP4Layout.quantize(v_tensor_ready)
+                                else:
+                                    qdata, params = TensorCoreNVFP4Layout.quantize(v_tensor_ready)
                                 tensors = TensorCoreNVFP4Layout.state_dict_tensors(qdata, params)
 
                                 store_quantized_weight(new_sd, k, tensors)
@@ -2241,6 +2319,9 @@ class StarUltimateModelConverter:
                             )
                         elif target_format == "mxfp8" and mxfp8_backend is not None:
                             with ck_registry.use_backend(mxfp8_backend):
+                                qdata, params = layout.quantize(v_tensor_ready)
+                        elif target_format == "nvfp4" and nvfp4_backend is not None:
+                            with ck.use_backend(nvfp4_backend):
                                 qdata, params = layout.quantize(v_tensor_ready)
                         else:
                             qdata, params = layout.quantize(v_tensor_ready)
