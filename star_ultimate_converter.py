@@ -1733,6 +1733,31 @@ class StarUltimateModelConverter:
                     else:
                         base_k_meta = base_k_file
 
+                    # [EMBED-GUARD] ComfyUI's format spec only accepts
+                    # float8_e4m3fn, float8_e5m2, or int8_tensorwise for
+                    # quantized embeddings. Every other target produces an
+                    # embedding tensor the loader rejects at inference time,
+                    # and the failure surfaces at load, not at conversion.
+                    # Keep bf16 unless the target or an embedding-friendly
+                    # profile override explicitly supports them.
+                    if "embed" in k.lower():
+                        _embed_ok_target = target_format in (
+                            "fp8", "int8", "int8_convrot", "int8_convrot_pruned",
+                        )
+                        _embed_ok_override = (
+                            (active_fp8 and any(n in k for n in active_fp8))
+                            or (active_force_int8 and any(n in k for n in active_force_int8))
+                            or (active_int8_convrot and any(n in k for n in active_int8_convrot))
+                        )
+                        if not (_embed_ok_target or _embed_ok_override):
+                            if v.dtype.is_floating_point:
+                                new_sd[k] = v.to(dtype=torch.bfloat16)
+                                counts["kept bf16 (embedding, unsupported format)"] += 1
+                            else:
+                                new_sd[k] = v
+                                counts["kept (embedding)"] += 1
+                            continue
+
                     v_tensor = v.to(device=device, dtype=torch.bfloat16)
 
                     if (
@@ -2377,6 +2402,25 @@ class StarUltimateModelConverter:
                 "file. Check the target_format string and the W4A8 block above."
             )
         new_sd = {k: v for k, v in new_sd.items() if not k.endswith(".comfy_quant")}
+
+        # [COMIFY-QUANT] Emit per-module <layer>.comfy_quant uint8 JSON
+        # tensors -- the current format. The file-level
+        # _quantization_metadata header below is kept alongside for
+        # readers that predate per-module entries; new readers prefer the
+        # per-module tensors and treat the header as legacy.
+        #
+        # Key convention: comfy_quant sits next to its weight using the
+        # same prefix the weight tensors use (base_k_file). ComfyUI
+        # strips the AIO 'model.diffusion_model.' prefix from all tensor
+        # keys on load, so both the weight and its comfy_quant end up
+        # under the model's internal module path.
+        for _layer_path, _layer_conf in quant_map["layers"].items():
+            _cq_key = f"{_layer_path}.comfy_quant"
+            if _cq_key not in new_sd:
+                new_sd[_cq_key] = torch.tensor(
+                    list(json.dumps(_layer_conf).encode("utf-8")),
+                    dtype=torch.uint8,
+                )
 
         final_metadata = OrderedDict()
 
