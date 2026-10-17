@@ -120,6 +120,47 @@
       "fp8_layers": [],
       "preserve_extended_metadata": false
     },
+	"Drama-3": {
+      "_note": "Drama-3 (Fish Audio 35B Sparse-MoE TTS). Protects embeddings, output heads, norms, biases, router gates, and key projection pathways to preserve emotion and multi-speaker expression.",
+      "blacklist": [
+        "bias",
+        "norm",
+        "scale",
+        "embed_tokens",
+        "token_embedding",
+        "position_embedding",
+        "lm_head",
+        "final_layer_norm",
+        "output_projection",
+        "router",
+        "gate",
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "down_proj"
+      ],
+      "fp8_layers": [],
+      "force_int8_layers": [],
+      "awq_prescale_layers": [],
+      "pruned_extra_blacklist": [],
+      "int8_convrot_layers": [],
+      "int4_convrot_layers": [],
+      "keep_fp32": [
+        "relative_attention_bias",
+        "inv_freq"
+      ],
+      "keep_fp16": [
+        "embed_tokens",
+        "token_embedding",
+        "lm_head"
+      ],
+      "w4a8_blacklist": [],
+      "w4a8_keep_fp32": [],
+      "w4a8_keep_fp16": [],
+      "nvfp4_group_size": null,
+      "preserve_extended_metadata": true
+    },
     "ERNIE-Image": {
       "_note": "Groups ERNIE-Image and ERNIE-Image-Turbo.",
       "blacklist": [
