@@ -1,5 +1,5 @@
-# ⭐ StarNodes Model Converter v1.5.9
-  Flux 3 Klein added, fix for amd gpus when converting to nvfp4 Moss image added
+# ⭐ StarNodes Model Converter v1.6
+  Flux 3 Klein added, fix for amd gpus when converting to nvfp4 Moss image added, Fibo 2.0
 ## 🆕 New Features
 *   **23.9.26 W6A8 Added 24.9.26 Ming image profile. Captains minmax changelog: 26.9 Qwen-Image-2.1 MaxQ & Z-Image MaxQ profiles  added
 *   **Star Checkpoint Saver (AIO) Saves model+clip+vae as one AIO checkpoint. Works with mixed quantizations (e.g. NVFP4 model + NVFP4 text encoder + BF16 VAE)
