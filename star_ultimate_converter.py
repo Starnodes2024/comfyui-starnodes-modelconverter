@@ -5,6 +5,7 @@ import time
 import glob
 import math
 import inspect
+import gc
 import subprocess
 import tempfile
 import shutil
@@ -744,7 +745,6 @@ def svdquant_split(weight: torch.Tensor, rank: int, groupsize: int, refine_iters
 
         qdata, params = layout.quantize(residual.float().contiguous(), convrot_groupsize=groupsize)
         qw = layout.dequantize(qdata, params).float()
-        del qdata, params
 
         left = w - (lw + qw)
         err = (torch.linalg.matrix_norm(left) / w_norm).item()
@@ -756,7 +756,9 @@ def svdquant_split(weight: torch.Tensor, rank: int, groupsize: int, refine_iters
         if best is not None and err >= best_err - 1e-6:
             break
 
-        best_err, best = err, (residual, l1, l2)
+        # Reuse the exact qdata/params the error estimate was computed against
+        # instead of requantizing the returned residual in the caller.
+        best_err, best = err, (qdata, params, l1, l2)
 
     return best
 
@@ -766,7 +768,67 @@ def build_output_path(out_dir, base_name, target_format):
     return os.path.join(out_dir, f"{stem}-{target_format.strip()}.safetensors")
 
 
+_SHARD_NAME_RE = re.compile(r"-\d{5}-of-\d{5}\.safetensors$")
+
+
+def shard_index_keys(files):
+    """Validates the resolved file set against model.safetensors.index.json and
+    returns the key set it claims, or None when the input isn't an indexed HF
+    shard folder.
+
+    load_input() unions every .safetensors it is given, so without this an
+    incomplete download (a missing shard) or a folder holding several variants
+    of the same model (bf16 + fp8 + int8, or a monolithic model.safetensors next
+    to the shards) converts silently into a broken or mixed file.
+    """
+    folder = os.path.dirname(files[0])
+    # HF uses model.safetensors.index.json, but some repos prefix it differently
+    # (diffusion_pytorch_model.safetensors.index.json, ...).
+    index_candidates = sorted(glob.glob(os.path.join(folder, "*.safetensors.index.json")))
+    index_path = index_candidates[0] if index_candidates else None
+
+    if index_path is None:
+        if len(files) > 1:
+            odd = [os.path.basename(f) for f in files
+                   if not _SHARD_NAME_RE.search(os.path.basename(f))]
+            if odd:
+                print(f"⚠️ No *.safetensors.index.json next to these files, and "
+                      f"{len(odd)}/{len(files)} of them don't look like HF shards "
+                      f"(e.g. '{odd[0]}'). Merging every .safetensors in the folder — "
+                      "point the converter at one specific file if that's not intended.")
+        return None
+
+    try:
+        with open(index_path, encoding="utf-8") as f:
+            weight_map = json.load(f).get("weight_map") or {}
+    except Exception as e:
+        raise ValueError(f"Could not read '{index_path}': {e}") from e
+    if not weight_map:
+        return None
+
+    expected = set(weight_map.values())
+    present = {os.path.basename(f) for f in files}
+    missing = sorted(expected - present)
+    extra = sorted(present - expected)
+    if missing:
+        raise ValueError(
+            f"Incomplete shard set: {len(missing)} file(s) listed in "
+            f"model.safetensors.index.json are missing ({', '.join(missing[:4])}"
+            f"{', ...' if len(missing) > 4 else ''}). Refusing to convert a partial model."
+        )
+    if extra:
+        raise ValueError(
+            f"{len(extra)} .safetensors file(s) in '{folder}' are not part of "
+            f"model.safetensors.index.json ({', '.join(extra[:4])}"
+            f"{', ...' if len(extra) > 4 else ''}). Point the converter at one specific "
+            "file, or use a folder that contains only this model's shards."
+        )
+    return set(weight_map)
+
+
 def load_input(files):
+    expected_keys = shard_index_keys(files)
+
     sd = {}
 
     for i, fp in enumerate(files):
@@ -784,10 +846,39 @@ def load_input(files):
         for _nk in [_k for _k in part if not isinstance(part[_k], torch.Tensor)]:
             print(f"⚠️ Skipping non-tensor entry '{_nk}' ({type(part[_nk]).__name__}) in {os.path.basename(fp)}")
             del part[_nk]
-        for k in part:
+        # A duplicate key is impossible within a valid shard set (the index
+        # guarantees uniqueness), so it means the wrong file set was picked.
+        # Only tolerate it when both copies are byte-identical.
+        for k in list(part):
             if k in sd:
-                print(f"⚠️ Duplicate key '{k}' in {os.path.basename(fp)}, overwriting")
+                if not torch.equal(sd[k], part[k]):
+                    raise ValueError(
+                        f"Key '{k}' from '{os.path.basename(fp)}' collides with a "
+                        "different tensor already merged — these files are not shards "
+                        "of one model (mixed quantizations or several models in one "
+                        "folder?). Point the converter at a single file or a clean "
+                        "shard set."
+                    )
+                print(f"⚠️ Duplicate key '{k}' in {os.path.basename(fp)} is identical — keeping one copy")
+                del part[k]
         sd.update(part)
+        # Free the shard as soon as its tensors are referenced by sd: a 9B bf16
+        # set is ~18 GB and the quantized output needs another 9-12 GB.
+        del part
+        gc.collect()
+
+    if expected_keys is not None:
+        missing = sorted(expected_keys - set(sd))
+        if missing:
+            raise ValueError(
+                f"The merged state dict is missing {len(missing)} tensor(s) listed in "
+                f"model.safetensors.index.json (e.g. '{missing[0]}'). The shard files do "
+                "not match the index — refusing to write a broken model."
+            )
+        unexpected = sorted(set(sd) - expected_keys)
+        if unexpected:
+            print(f"⚠️ {len(unexpected)} tensor(s) are present in the shards but not "
+                  f"listed in the index (e.g. '{unexpected[0]}') — keeping them.")
 
     # [PTH-VAE-FIX] guard safetensors metadata read for pickle (.pth/.pt/.ckpt) inputs
     orig_meta = None
@@ -1040,6 +1131,14 @@ def dequantize_input(sd, metadata):
 
     for layer, info in quant_layers.items():
         fmt = info.get("format")
+
+        if fmt == "convrot_w4a4" and info.get("svdquant"):
+            raise ValueError(
+                f"Input model contains SVDQuant W4A4 layer '{layer}'. "
+                "This converter cannot yet dequantize SVDQuant sources "
+                "(needs TensorCoreConvRotW4A4Layout.dequantize + the svdq_l1/"
+                "svdq_l2 branches). Use a higher-precision source model."
+            )
 
         if fmt in ("nvfp4", "mxfp8", "convrot_w4a4", "w4a4", "asym_w4a8_int8", "w6a8_int8", "awq_w4a16"):
             raise ValueError(
@@ -1967,6 +2066,7 @@ class StarUltimateModelConverter:
 
                         try:
                             v_tensor_ready = v_tensor.float().contiguous()
+                            layout = TensorCoreConvRotW4A4Layout
 
                             split = svdquant_split(
                                 v_tensor_ready,
@@ -1978,31 +2078,26 @@ class StarUltimateModelConverter:
                             if split is None:
                                 print(
                                     f"  warning: {k} is degenerate (zero or non-finite); "
-                                    f"quantizing without a low-rank branch"
+                                    f"quantizing as plain W4A4 (no low-rank branch)"
                                 )
-                                residual = v_tensor_ready.to(torch.bfloat16)
+                                qdata, params = layout.quantize(
+                                    v_tensor_ready, convrot_groupsize=CONVROT_GROUPSIZE,
+                                )
                                 l1 = l2 = None
                             else:
-                                residual, l1, l2 = split
+                                qdata, params, l1, l2 = split
 
-                            layout = TensorCoreConvRotW4A4Layout
-
-                            qdata, params = layout.quantize(
-                                residual.float().contiguous(),
-                                convrot_groupsize=CONVROT_GROUPSIZE,
+                            store_quantized_weight(
+                                new_sd, k, layout.state_dict_tensors(qdata, params),
                             )
-
-                            tensors = layout.state_dict_tensors(qdata, params)
-                            store_quantized_weight(new_sd, k, tensors)
 
                             layer_conf = {
                                 "format": "convrot_w4a4",
                                 "convrot_groupsize": CONVROT_GROUPSIZE,
-                                "svdquant": l1 is not None,
-                                "svdquant_rank": svdquant_rank,
                             }
-
                             if l1 is not None:
+                                layer_conf["svdquant"] = True
+                                layer_conf["svdquant_rank"] = int(l1.shape[1])
                                 new_sd[f"{base_k_file}.svdq_l1"] = l1.cpu()
                                 new_sd[f"{base_k_file}.svdq_l2"] = l2.cpu()
 
@@ -2013,14 +2108,29 @@ class StarUltimateModelConverter:
                                 del v_tensor, v_tensor_ready
 
                         except Exception as e:
-                            print(f"⚠️ SVDQuant failed for {k}: {e}")
-
-                            if v.dtype.is_floating_point:
-                                new_sd[k] = v.to(dtype=torch.bfloat16)
-                                counts["kept bf16"] += 1
-                            else:
-                                new_sd[k] = v
-                                counts["kept"] += 1
+                            print(f"⚠️ SVDQuant failed for {k}, falling back to plain W4A4: {e}")
+                            try:
+                                v_tensor_ready = v_tensor.float().contiguous()
+                                qdata, params = TensorCoreConvRotW4A4Layout.quantize(
+                                    v_tensor_ready, convrot_groupsize=CONVROT_GROUPSIZE,
+                                )
+                                store_quantized_weight(
+                                    new_sd, k,
+                                    TensorCoreConvRotW4A4Layout.state_dict_tensors(qdata, params),
+                                )
+                                quant_map["layers"][base_k_meta] = {
+                                    "format": "convrot_w4a4",
+                                    "convrot_groupsize": CONVROT_GROUPSIZE,
+                                }
+                                counts["svdquant_w4a4_fallback_w4a4"] += 1
+                            except Exception as e2:
+                                print(f"⚠️ Plain W4A4 fallback also failed for {k}: {e2}")
+                                if v.dtype.is_floating_point:
+                                    new_sd[k] = v.to(dtype=torch.bfloat16)
+                                    counts["kept bf16"] += 1
+                                else:
+                                    new_sd[k] = v
+                                    counts["kept"] += 1
 
                             if device == "cuda":
                                 del v_tensor
