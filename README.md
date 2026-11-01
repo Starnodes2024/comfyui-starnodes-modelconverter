@@ -13,6 +13,7 @@
 *   **Minimax-H3 Native Mix**: Added `minimax_h3_native_mix` target format implementing Minimax-H3's official mixed-precision recipe: INT8 ConvRot for `attn.qkv_proj`, NVFP4 for `mlp.fc1/fc2`, BF16 for boundary blocks and `attn.out_proj`.
 *   **Learned Rounding**: Added optional gradient-descent-based learned rounding for FP8 and INT8 ConvRot targets. Calibration-free (uses weight's own top-k SVD subspace), configurable iterations (10–5000), learning rate, and top-k ratio. Falls back gracefully to naive round-to-nearest on failure.
 *   **GGUF K-Quant Support**: Added GGUF K-quant target formats (`gguf_q3_k_s/m`, `gguf_q4_k_s/m`, `gguf_q5_k_s/m`, `gguf_q6_k`) via two-stage pipeline: intermediate F16/BF16 GGUF → llama.cpp `llama-quantize --pure`. Includes configurable `llama_quantize_bin` path and optional intermediate file retention.
+*   **W8A16 Targets**: Added `w8a16`, `w8a16_convrot`, and `w8a16_convrot_pruned` target formats — INT8 weights run with 16-bit activations. ComfyUI stores no 8-bit activations, so these write exactly what `int8` / `int8_convrot` write (int8_tensorwise weight + `weight_scale`, optional ConvRot GS:256) and add `"full_precision_matrix_mult": true` to each quantized module's `comfy_quant` entry. ComfyUI then dequantizes the weight to the compute dtype and runs a bf16 matmul instead of the fused int8 GEMM (which quantizes activations per row inside the kernel), so there is no activation-quantization error. File size is unchanged; cost is roughly 2x matmul time and a transient bf16 copy of each weight, while the resident weight stays int8. The Layers Info node labels these layers `INT8_CONVROT (GS:256) [W8A16]`. Verified on ROCm (RX 7800 XT): a 9.47 GB bf16 MOSS-Image source converts to 5.04 GB with all 168 block linears flagged, and the loader's forward is bit-identical to a bf16 matmul on the dequantized weight.
 *   **Expanded Model Profiles**: Added 20+ new architecture profiles in `models.json`: YuE2, ACE-Step, Anima, Boogu-Image, Chroma, ERNIE-Image, Ideogram-4, Krea-2, Lens, LTX-2.5, Qwen-Image, Qwen-Image W4A8, **Qwen Image 2.1**, SeedVR, Z-Image, and 7 Minimax-H3 variants (ref_nvfp4_fp8, ref_nvfp4_int8convrot, int4_tensorwise_experimental, int8convrot_int4fc2, int8convrot_int4mlp, VAE, TE).
 
 ## 🔧 Fixes & Improvements
@@ -42,7 +43,7 @@ ComfyUI custom nodes for converting, quantizing, analyzing, and managing diffusi
 ## Features
 
 ### Core Conversion Features
-- **Multiple Format Support**: Convert models to NVFP4, FP8, MXFP8, INT8, INT8 ConvRot, INT4 ConvRot, FP16, or FP32
+- **Multiple Format Support**: Convert models to NVFP4, FP8, MXFP8, INT8, INT8 ConvRot, INT4 ConvRot, W8A16 (INT8 weights, bf16 compute), FP16, or FP32
 - **Smart Layer Preservation**: Architecture-specific profiles ensure critical layers stay in high precision
 - **Automatic Dequantization**: Intelligently handles pre-quantized models for clean re-quantization
 - **Multi-Shard Support**: Seamlessly processes models split across multiple .safetensors files

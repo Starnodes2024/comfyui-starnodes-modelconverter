@@ -525,9 +525,10 @@ class StarModelLayersInfo:
             if cfg.get("convrot"):
                 gs = cfg.get("convrot_groupsize", 256)
                 layer_stats["int8_convrot"] += 1
-                return f"INT8_CONVROT (GS:{gs})"
+                return f"INT8_CONVROT (GS:{gs})" + (
+                    " [W8A16]" if cfg.get("full_precision_matrix_mult") else "")
             layer_stats["int8"] += 1
-            return "INT8"
+            return "INT8" + (" [W8A16]" if cfg.get("full_precision_matrix_mult") else "")
 
         if fmt == "convrot_w4a4":
             gs = cfg.get("convrot_groupsize", 256)
@@ -579,9 +580,10 @@ class StarModelLayersInfo:
             if meta.get("convrot"):
                 gs = meta.get("convrot_groupsize", 256)
                 layer_stats["int8_convrot"] += 1
-                return f"INT8_CONVROT (GS:{gs})"
+                return f"INT8_CONVROT (GS:{gs})" + (
+                    " [W8A16]" if meta.get("full_precision_matrix_mult") else "")
             layer_stats["int8"] += 1
-            return "INT8"
+            return "INT8" + (" [W8A16]" if meta.get("full_precision_matrix_mult") else "")
 
         if fmt == "convrot_w4a4":
             gs = meta.get("convrot_groupsize", 256)

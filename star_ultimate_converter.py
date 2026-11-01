@@ -83,6 +83,11 @@ TARGET_FORMATS = [
     "int4_convrot",
     "int8_convrot_pruned",
     "int4_convrot_pruned",
+    # [W8A16] Same storage as int8 / int8_convrot, plus the per-module
+    # "full_precision_matrix_mult": true flag (see W8A16_TARGET_FORMATS below).
+    "w8a16",
+    "w8a16_convrot",
+    "w8a16_convrot_pruned",
     "w4a8_convrot",
     "w4a8_convrot_pruned",
     "w6a8_convrot",
@@ -112,6 +117,20 @@ TARGET_FORMATS = [
     "gguf_q5_k_m",
     "gguf_q6_k",
 ]
+
+# [W8A16] int8 weights, bf16 compute.
+#
+# These targets store byte-for-byte what `int8` / `int8_convrot` store: an
+# int8_tensorwise weight (int8 qdata + weight_scale, optional ConvRot GS:256),
+# because ComfyUI has no separate 8-bit "activation" storage -- activations are
+# never saved. What differs is one per-module comfy_quant flag,
+# "full_precision_matrix_mult": true, which makes ComfyUI dequantize the weight
+# to the compute dtype and run a plain bf16 matmul instead of the fused int8 GEMM
+# (comfy-kitchen's int8_linear, which quantizes activations per row inside the
+# kernel). So: no activation quantization error, at ~2x matmul cost and a bf16
+# copy of each weight during the layer. See ComfyUI's QUANTIZATION.md,
+# "Format options" -> full_precision_matrix_mult.
+W8A16_TARGET_FORMATS = ("w8a16", "w8a16_convrot", "w8a16_convrot_pruned")
 
 GGUF_LEGACY_QUANT_MAP = {
     "gguf_f16": None,
@@ -219,6 +238,7 @@ PRECISION_RE = re.compile(
     r"fp8(?:_e[45]m[23](?:fn)?)(?:_scaled)?(?:_fast)?|"
     r"int[48](?:_convrot)?(?:_tensorwise)?(?:_pruned)?|"
     r"w[46]a8(?:_convrot)?(?:_pruned)?|"
+    r"w8a16(?:_convrot)?(?:_pruned)?|"
     r"awq_w4a16|"
     r"nvfp4|svdquant_w4a4|w4a4"
     r")(?=[-_.]|$)",
@@ -533,6 +553,16 @@ def resolve_int8_convrot_group_size(in_features: int, requested_group_size: int)
     if requested_group_size == 256 and in_features % 64 == 0:
         return 64
     return None
+
+
+def as_w8a16_conf(layer_conf):
+    """[W8A16] Mark an int8_tensorwise layer as weight-only, in place.
+
+    ComfyUI reads this from the module's comfy_quant JSON and then dequantizes
+    the int8 weight for a bf16 matmul instead of running the int8 GEMM.
+    """
+    layer_conf["full_precision_matrix_mult"] = True
+    return layer_conf
 
 
 def quantize_int8_rowwise_convrot(
@@ -1525,6 +1555,7 @@ class StarUltimateModelConverter:
         is_w6a8 = target_format in ("w6a8_convrot", "w6a8_convrot_pruned")
         is_awq_w4a16 = target_format == "awq_w4a16"
         is_w4a4 = target_format == "w4a4"
+        is_w8a16 = target_format in W8A16_TARGET_FORMATS
         is_gguf = target_format in GGUF_TARGET_FORMATS
         is_gguf_kquant = target_format in GGUF_KQUANT_MAP
 
@@ -1596,6 +1627,17 @@ class StarUltimateModelConverter:
                     raise ValueError(
                         "svdquant_w4a4 requires comfy-kitchen TensorCoreConvRotW4A4Layout. "
                         "Update comfy-kitchen to a build that contains it."
+                    )
+
+            elif is_w8a16:
+                # Same INT8 storage as int8 / int8_convrot; only the loader flag
+                # differs. Requires the tensor-wise INT8 layout (and, for the
+                # _convrot variants, its ConvRot rotation path).
+                if not KITCHEN_AVAILABLE or TensorWiseINT8Layout is None:
+                    raise ValueError(
+                        "The w8a16 targets store INT8 weights through comfy-kitchen's "
+                        "TensorWiseINT8Layout. Update comfy-kitchen to a build that "
+                        "contains it."
                     )
 
             elif not KITCHEN_AVAILABLE:
@@ -1842,7 +1884,7 @@ class StarUltimateModelConverter:
                     if "embed" in k.lower():
                         _embed_ok_target = target_format in (
                             "fp8", "int8", "int8_convrot", "int8_convrot_pruned",
-                        )
+                        ) or target_format in W8A16_TARGET_FORMATS
                         _embed_ok_override = (
                             (active_fp8 and any(n in k for n in active_fp8))
                             or (active_force_int8 and any(n in k for n in active_force_int8))
@@ -1872,7 +1914,10 @@ class StarUltimateModelConverter:
                             tensors = TensorWiseINT8Layout.state_dict_tensors(qdata, params)
 
                             store_quantized_weight(new_sd, k, tensors)
-                            quant_map["layers"][base_k_meta] = {"format": "int8_tensorwise"}
+                            forced_conf = {"format": "int8_tensorwise"}
+                            if is_w8a16:
+                                as_w8a16_conf(forced_conf)
+                            quant_map["layers"][base_k_meta] = forced_conf
                             counts["forced_int8"] += 1
 
                             if device == "cuda":
@@ -1952,6 +1997,8 @@ class StarUltimateModelConverter:
                                 )
                                 new_sd[k] = qdata.cpu()
                                 new_sd[f"{base_k_file}.weight_scale"] = scale.to(torch.bfloat16).cpu()
+                                if is_w8a16:
+                                    as_w8a16_conf(quant_conf)
                                 quant_map["layers"][base_k_meta] = quant_conf
                             else:
                                 qdata, params = TensorWiseINT8Layout.quantize(
@@ -1962,11 +2009,14 @@ class StarUltimateModelConverter:
                                 )
                                 tensors = TensorWiseINT8Layout.state_dict_tensors(qdata, params)
                                 store_quantized_weight(new_sd, k, tensors)
-                                quant_map["layers"][base_k_meta] = {
+                                override_conf = {
                                     "format": "int8_tensorwise",
                                     "convrot": True,
                                     "convrot_groupsize": CONVROT_GROUPSIZE,
                                 }
+                                if is_w8a16:
+                                    as_w8a16_conf(override_conf)
+                                quant_map["layers"][base_k_meta] = override_conf
 
                             counts["override_int8_convrot"] += 1
 
@@ -2358,7 +2408,10 @@ class StarUltimateModelConverter:
 
                         continue
 
-                    int8_convrot = target_format in ("int8_convrot", "int8_convrot_pruned")
+                    int8_convrot = target_format in (
+                        "int8_convrot", "int8_convrot_pruned",
+                        "w8a16_convrot", "w8a16_convrot_pruned",
+                    )
                     int4_convrot = target_format in ("int4_convrot", "int4_convrot_pruned", "w4a4")
 
                     if int8_convrot and learned_rounding:
@@ -2375,6 +2428,8 @@ class StarUltimateModelConverter:
                             )
                             new_sd[k] = qdata.cpu()
                             new_sd[f"{base_k_file}.weight_scale"] = scale.to(torch.bfloat16).cpu()
+                            if is_w8a16:
+                                as_w8a16_conf(quant_conf)
                             quant_map["layers"][base_k_meta] = quant_conf
                             counts[target_format] += 1
                             if device == "cuda":
@@ -2389,10 +2444,13 @@ class StarUltimateModelConverter:
                                 )
                                 tensors = TensorWiseINT8Layout.state_dict_tensors(qdata, params)
                                 store_quantized_weight(new_sd, k, tensors)
-                                quant_map["layers"][base_k_meta] = {
+                                naive_conf = {
                                     "format": "int8_tensorwise", "convrot": True,
                                     "convrot_groupsize": CONVROT_GROUPSIZE,
                                 }
+                                if is_w8a16:
+                                    as_w8a16_conf(naive_conf)
+                                quant_map["layers"][base_k_meta] = naive_conf
                                 counts[target_format] += 1
                             except Exception as e2:
                                 print(f"⚠️ Naive fallback also failed for {k}: {e2}")
@@ -2406,7 +2464,8 @@ class StarUltimateModelConverter:
                                 del v_tensor
                         continue
 
-                    if target_format in ("int8", "int8_convrot", "int8_convrot_pruned"):
+                    if target_format in ("int8", "int8_convrot", "int8_convrot_pruned",
+                                         *W8A16_TARGET_FORMATS):
                         layout = TensorWiseINT8Layout
                         fmt_name = "int8_tensorwise"
                     elif target_format in ("int4_convrot", "int4_convrot_pruned", "w4a4"):
@@ -2478,6 +2537,9 @@ class StarUltimateModelConverter:
 
                         if pre_quant_scale is not None:
                             layer_conf["awq_prescale"] = True
+
+                        if is_w8a16:
+                            as_w8a16_conf(layer_conf)
 
                         quant_map["layers"][base_k_meta] = layer_conf
                         counts[target_format] += 1
