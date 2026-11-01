@@ -10,17 +10,18 @@ The Star Ultimate Model Converter provides advanced quantization capabilities fo
 
 ### Required
 
-- **model_name**: Select a diffusion model from your `models/diffusion_models` folder
-- **model_type**: Choose the model architecture profile (Flux, SDXL, LTX, etc.)
-- **target_format**: Target quantization format (NVFP4, FP8, MXFP8, INT8, INT8 ConvRot, INT4 ConvRot, FP16, FP32)
+- **mode**: What you are converting — `Diffusion Model`, `Checkpoint`, `AIO`, `Text-Encoder`, `VAE` or `Custom Path`
+- **diffusion_model / checkpoint / text_encoder / vae**: Source file from the matching ComfyUI folder (only the one for your `mode` is used)
+- **model_type**: Choose the model architecture profile (Flux, Qwen, Wan, MiniMax-H3, MOSS, etc.)
+- **target_format**: Target format — see [Supported Formats](#supported-formats)
 - **device**: Processing device (cuda for GPU, cpu for CPU)
 
 ### Optional
 
-- **use_custom_path**: Enable to use a custom file path
-- **custom_path**: Full path to .safetensors file or folder with shards
-- **use_aio_checkpoint**: Enable to convert from an AIO checkpoint
-- **checkpoint_name**: Select AIO checkpoint (only diffusion model is extracted)
+- **custom_path**: File, shard folder or HF snapshot dir, used with `mode` = Custom Path (must be inside a ComfyUI model folder)
+- **learned_rounding / _iters / _lr / _topk_ratio**: Gradient-descent refinement of FP8 and INT8 ConvRot rounding (much slower)
+- **svdquant_rank / svdquant_refine_iters**: `svdquant_w4a4` only
+- **gguf_arch / llama_quantize_bin / keep_intermediate_gguf**: GGUF targets only
 
 ## Outputs
 
@@ -64,8 +65,17 @@ The Star Ultimate Model Converter provides advanced quantization capabilities fo
 ### INT8 ConvRot (8-bit with Rotation)
 - **Size**: ~50% of original
 - **Quality**: Very good
-- **Hardware**: ComfyUI v0.27.0+
+- **Hardware**: ComfyUI with per-module `comfy_quant`
 - **Best for**: Better quality than plain INT8
+
+### W8A16 / W8A16 ConvRot (INT8 weights, 16-bit compute)
+- **Size**: ~50% of original (identical to INT8 / INT8 ConvRot)
+- **Quality**: Closest to BF16 — no activation-quantization error
+- **Hardware**: ComfyUI with per-module `comfy_quant`
+- **Best for**: When activation quantization hurts; ~2x slower matmul than INT8 ConvRot
+- **How**: writes the same INT8 storage as `int8` / `int8_convrot` and adds
+  `"full_precision_matrix_mult": true`, so ComfyUI dequantizes the weight and runs a bf16 matmul
+  instead of the fused INT8 GEMM
 
 ### INT4 ConvRot (4-bit with Rotation)
 - **Size**: ~25% of original
@@ -107,11 +117,12 @@ Each profile includes carefully tuned blacklists:
 
 ```
 [Star Ultimate Model Converter]
-  - model_name: flux-dev-fp16
-  - model_type: Flux Family
+  - mode: Diffusion Model
+  - diffusion_model: flux-dev-fp16.safetensors
+  - model_type: Flux1 / Flux2
   - target_format: nvfp4
   - device: cuda
-  
+
 → flux-dev-nvfp4.safetensors (11.9 GB → 3.0 GB)
 ```
 
