@@ -85,8 +85,12 @@ Restart ComfyUI. All nodes appear under the **⭐StarNodes** category.
   need ComfyUI with `comfy_quant` per-module support.
 - **comfy-kitchen** — the quantization library. Ships with recent ComfyUI; otherwise
   `pip install comfy-kitchen`. `w6a8_convrot` additionally needs a build containing
-  [comfy-kitchen#191](https://github.com/Comfy-Org/comfy-kitchen) (the `bits` parameter); the node
-  probes for it and refuses with a clear message rather than misquantizing.
+  [comfy-kitchen#191](https://github.com/Comfy-Org/comfy-kitchen) (the `bits` parameter);
+  `w3a8_convrot` / `w5a8_convrot` need
+  [comfy-kitchen#303](https://github.com/Comfy-Org/comfy-kitchen/pull/303) (3- and 5-bit widths),
+  and ComfyUI still needs the matching `w3a8_int8` / `w5a8_int8` loader registration before those
+  files can be loaded. The node probes the installed build and refuses with a clear message rather
+  than misquantizing.
 - **PyTorch 2.0+**.
 - **GPU** — CUDA or ROCm. `device: cuda` is 10–50× faster than `cpu`; every format also converts on
   `cpu` if VRAM is the bottleneck. Native NVFP4 *compute* is NVIDIA-oriented, but NVFP4
@@ -165,7 +169,9 @@ folder holding two different models is refused instead of silently producing a b
 | **`w8a16`** | 8 | INT8 + scalar scale, bf16 matmul | weight-only 8-bit |
 | **`w8a16_convrot`** | 8 | INT8 + per-row scale + GS:256, bf16 matmul | weight-only 8-bit, high quality |
 | `int4_convrot` | 4 | INT4 + group scales + rotation GS:256/QGS:64 | ~25% size |
+| `w3a8_convrot` | 3 | packed 3-bit codes + 8-entry codebook + FP8 per-group scale | needs comfy-kitchen#303 |
 | `w4a8_convrot` | 4 | packed 4-bit codes + FP8 per-group scale | needs `AsymW4A8Int8Layout` |
+| `w5a8_convrot` | 5 | packed 5-bit codes (uniform ±15) + FP8 per-group scale | needs comfy-kitchen#303 |
 | `w6a8_convrot` | 6 | packed 6-bit codes + FP8 per-group scale | needs comfy-kitchen#191 |
 | `awq_w4a16` | 4 | 4-bit + scale/zero (group 64) | weight-only 4-bit |
 | `w4a4` | 4 | INT4 weights + INT4 activations | fastest 4-bit path |
@@ -174,8 +180,9 @@ folder holding two different models is refused instead of silently producing a b
 | `fp16` / `fp32` | 16 / 32 | plain float | no compression |
 | `gguf_*` | — | `gguf_f16/bf16/q8_0/q5_1/q5_0/q4_1/q4_0` and `q3_k_s/m`, `q4_k_s/m`, `q5_k_s/m`, `q6_k` | K-quants need `llama-quantize` |
 
-`int8_convrot_pruned`, `int4_convrot_pruned`, `w4a8_convrot_pruned`, `w6a8_convrot_pruned` and
-`w8a16_convrot_pruned` apply the profile's extra "pruned model" blacklist.
+`int8_convrot_pruned`, `int4_convrot_pruned`, `w3a8_convrot_pruned`, `w4a8_convrot_pruned`,
+`w5a8_convrot_pruned`, `w6a8_convrot_pruned` and `w8a16_convrot_pruned` apply the profile's extra
+"pruned model" blacklist.
 
 ### Output
 
@@ -271,7 +278,7 @@ critical paths stay BF16 while the rest is quantized.
 | INT8 ConvRot | ★★★☆☆ | ★★★★☆ | ComfyUI with `comfy_quant` | ★★★☆☆ |
 | W8A16 ConvRot | ★★★☆☆ | ★★★★☆ | ComfyUI with `comfy_quant` | ★★☆☆☆ |
 | INT4 ConvRot | ★★★★★ | ★★★★☆ | SM 8.0+ / ROCm | ★★★★☆ |
-| W4A8 / W6A8 ConvRot | ★★★★★ | ★★★★☆ | comfy-kitchen with `AsymW4A8Int8Layout` | ★★★★☆ |
+| W3A8 / W4A8 / W5A8 / W6A8 ConvRot | ★★★★★ | ★★★★☆ | comfy-kitchen with `AsymW4A8Int8Layout` (3/5-bit need #303) | ★★★★☆ |
 | SVDQuant W4A4 | ★★★★★ | ★★★★★ | comfy-kitchen, needs `TensorCoreConvRotW4A4Layout` | ★★☆☆☆ |
 | FP16 | ★★☆☆☆ | ★★★★★ | All hardware | ★★★★☆ |
 | FP32 | ★☆☆☆☆ | ★★★★★ | All hardware | ★★☆☆☆ |
@@ -350,6 +357,15 @@ MIT — see [LICENSE](LICENSE). Respect the licenses of the models you convert.
 ---
 
 ## Changelog
+
+### Unreleased
+- 🆕 **W3A8 / W5A8 ConvRot** — `w3a8_convrot`, `w3a8_convrot_pruned`, `w5a8_convrot`,
+  `w5a8_convrot_pruned`: the same `AsymW4A8Int8Layout` at `bits=3` and `bits=5`
+  ([comfy-kitchen#303](https://github.com/Comfy-Org/comfy-kitchen/pull/303)). 3-bit stores `3K/8`
+  bytes per row and decodes through an 8-entry codebook (so the file carries `weight_codebook`);
+  5-bit stores `5K/8` bytes with uniform levels. Both need a comfy-kitchen build containing #303,
+  plus ComfyUI's `w3a8_int8` / `w5a8_int8` loader registration, before they can be loaded. The node
+  probes the installed build and refuses with a clear message rather than misquantizing.
 
 ### v1.7
 - 🆕 **W8A16 targets** — `w8a16`, `w8a16_convrot`, `w8a16_convrot_pruned`: INT8 weights, bf16 matmul

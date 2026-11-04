@@ -92,6 +92,12 @@ TARGET_FORMATS = [
     "w4a8_convrot_pruned",
     "w6a8_convrot",
     "w6a8_convrot_pruned",
+    # [W3A8 / W5A8] Same comfy-kitchen AsymW4A8Int8Layout class, bits=3 and
+    # bits=5. Constants and design notes live in the W3A8_* / W5A8_* block below.
+    "w3a8_convrot",
+    "w3a8_convrot_pruned",
+    "w5a8_convrot",
+    "w5a8_convrot_pruned",
     "awq_w4a16",
     "w4a4",
     "minimax_h3_native_mix",
@@ -226,6 +232,31 @@ W6A8_CONVROT_GROUPSIZE = 256
 W6A8_BITS = 6
 W6A8_FORMAT_NAME = "w6a8_int8"
 
+# W3A8 / W5A8: the same AsymW4A8Int8Layout class a third and fourth time, selected
+# via bits=3 and bits=5. Landed in Comfy-Org/comfy-kitchen#303 ("Add w3 and w5
+# quantization formats", kijai's w3w5 branch). The bit depth is implied by the
+# packed row width, so the checkpoint needs no extra metadata:
+#   bits=3 -> 3K/8 bytes per row: 2-bit plane (K/4) + 1-bit plane (K/8), 8-entry
+#             codebook (the PR's frozen Lloyd-Max LUT8)   -> codebook=True
+#   bits=5 -> 5K/8 bytes per row: nibble plane (K/2) + 1-bit plane (K/8), uniform
+#             -15..15 levels, no codebook               -> codebook=False
+# The layout's own state_dict_tensors() emits the 8-entry "_codebook" tensor for
+# bits=3, which store_w4a8_quantized_weight() already routes to weight_codebook.
+# ComfyUI still needs the matching "w3a8_int8" / "w5a8_int8" loader registration
+# (comfy-kitchen's ops.py / quant_ops.py); until that lands this node can write
+# these files but ComfyUI cannot load them.
+W3A8_GROUP_SIZE = 16
+W3A8_CONVROT_GROUPSIZE = 256
+W3A8_BITS = 3
+W3A8_CODEBOOK = True
+W3A8_FORMAT_NAME = "w3a8_int8"
+
+W5A8_GROUP_SIZE = 16
+W5A8_CONVROT_GROUPSIZE = 256
+W5A8_BITS = 5
+W5A8_CODEBOOK = False
+W5A8_FORMAT_NAME = "w5a8_int8"
+
 AWQ_W4A16_GROUP_SIZE = 64
 LEARNED_ROUNDING_DEFAULT_ITERS = 200
 LEARNED_ROUNDING_DEFAULT_LR = 0.01
@@ -237,7 +268,7 @@ PRECISION_RE = re.compile(
     r"fp32|fp16|bf16|mxfp8|"
     r"fp8(?:_e[45]m[23](?:fn)?)(?:_scaled)?(?:_fast)?|"
     r"int[48](?:_convrot)?(?:_tensorwise)?(?:_pruned)?|"
-    r"w[46]a8(?:_convrot)?(?:_pruned)?|"
+    r"w[3456]a8(?:_convrot)?(?:_pruned)?|"
     r"w8a16(?:_convrot)?(?:_pruned)?|"
     r"awq_w4a16|"
     r"nvfp4|svdquant_w4a4|w4a4"
@@ -1065,6 +1096,108 @@ def quantize_w4a8_convrot(weight_f32: torch.Tensor):
         )
 
 
+_WXA8_BITS_SUPPORT_CACHE = {}
+
+
+def _probe_wxa8_bits(bits: int, codebook: bool) -> bool:
+    """True when the installed comfy-kitchen can actually quantize at ``bits``.
+
+    The ``bits`` kwarg has existed since W6A8 landed, so checking the signature
+    is not enough: a build without the 3/5-bit work (comfy-kitchen#303) accepts
+    the parameter and then dies deep in the backend with a bare "bits must be
+    4 or 6". One tiny quantize per (bits, codebook) pair, cached, gives a single
+    actionable error up front instead of one traceback per layer.
+    """
+    cache_key = (bits, codebook)
+    if cache_key in _WXA8_BITS_SUPPORT_CACHE:
+        return _WXA8_BITS_SUPPORT_CACHE[cache_key]
+
+    supported = False
+
+    if W4A8_AVAILABLE and "bits" in inspect.signature(W4A8_LAYOUT.quantize).parameters:
+        try:
+            probe = torch.zeros(16, 256, dtype=torch.float32)
+            W4A8_LAYOUT.quantize(
+                probe,
+                bits=bits,
+                codebook=codebook,
+                group_size=W4A8_GROUP_SIZE,
+                convrot_groupsize=W4A8_CONVROT_GROUPSIZE,
+                symmetric=W4A8_SYMMETRIC,
+            )
+            supported = True
+        except Exception:
+            supported = False
+
+    _WXA8_BITS_SUPPORT_CACHE[cache_key] = supported
+    return supported
+
+
+def _require_wxa8_bits(bits: int, codebook: bool, label: str, pr_hint: str):
+    if not W4A8_AVAILABLE:
+        raise RuntimeError(
+            f"{label} requires comfy-kitchen AsymW4A8Int8Layout (the class W4A8 uses). "
+            "Update comfy-kitchen to a build that contains it."
+        )
+
+    if not _probe_wxa8_bits(bits, codebook):
+        raise RuntimeError(
+            f"{label} requires a comfy-kitchen build with {bits}-bit AsymW4A8Int8Layout "
+            f"support ({pr_hint}). The installed build only accepts bits=4 and bits=6 -- "
+            f"install a build that contains that work before converting to {label}."
+        )
+
+
+def _quantize_asym_wxa8_convrot(
+    weight_f32: torch.Tensor,
+    *,
+    bits: int,
+    group_size: int,
+    convrot_groupsize: int,
+    codebook: bool,
+    label: str,
+    pr_hint: str,
+):
+    """Shared quantize call for the W3A8 / W5A8 / W6A8 bit widths.
+
+    All three are the same AsymW4A8Int8Layout class; only ``bits`` (and the
+    matching codebook choice) differ. The kwargs are built from the live
+    signature so an older build's missing/renamed parameter still fails through
+    the TypeError fallback rather than a hard crash at import time.
+    """
+    _require_wxa8_bits(bits, codebook, label, pr_hint)
+
+    sig = inspect.signature(W4A8_LAYOUT.quantize)
+    kwargs = {"bits": bits, "codebook": codebook}
+
+    if "group_size" in sig.parameters:
+        kwargs["group_size"] = group_size
+    elif "quant_group_size" in sig.parameters:
+        kwargs["quant_group_size"] = group_size
+
+    if "convrot_groupsize" in sig.parameters:
+        kwargs["convrot_groupsize"] = convrot_groupsize
+
+    if "convrot" in sig.parameters:
+        kwargs["convrot"] = True
+
+    if "symmetric" in sig.parameters:
+        kwargs["symmetric"] = W4A8_SYMMETRIC
+
+    try:
+        return W4A8_LAYOUT.quantize(weight_f32, **kwargs)
+
+    except TypeError:
+        return W4A8_LAYOUT.quantize(
+            weight_f32,
+            bits=bits,
+            codebook=codebook,
+            group_size=group_size,
+            convrot_groupsize=convrot_groupsize,
+            symmetric=W4A8_SYMMETRIC,
+        )
+
+
 def quantize_w6a8_convrot(weight_f32: torch.Tensor):
     """
     W6A8: same comfy-kitchen AsymW4A8Int8Layout class as W4A8, with bits=6
@@ -1076,49 +1209,60 @@ def quantize_w6a8_convrot(weight_f32: torch.Tensor):
     capability probe for that, raising a clear RuntimeError otherwise
     instead of silently falling back to 4-bit or misquantizing.
     """
-    if not W4A8_AVAILABLE:
-        raise RuntimeError(
-            "W6A8 requires comfy-kitchen AsymW4A8Int8Layout (same class W4A8 uses). "
-            "Update comfy-kitchen to a build that contains it."
-        )
+    return _quantize_asym_wxa8_convrot(
+        weight_f32,
+        bits=W6A8_BITS,
+        group_size=W6A8_GROUP_SIZE,
+        convrot_groupsize=W6A8_CONVROT_GROUPSIZE,
+        codebook=False,
+        label="W6A8",
+        pr_hint="comfy-kitchen#191, merged commit e33c9bd",
+    )
 
-    try:
-        sig = inspect.signature(W4A8_LAYOUT.quantize)
-        if "bits" not in sig.parameters:
-            raise RuntimeError(
-                "This comfy-kitchen build's AsymW4A8Int8Layout.quantize() has no 'bits' "
-                "parameter, so it cannot produce W6A8. W6A8 landed in comfy-kitchen#191 "
-                "(merged commit e33c9bd) -- update comfy-kitchen to a build that includes "
-                "6-bit support."
-            )
 
-        kwargs = {"bits": W6A8_BITS, "codebook": False}
+def quantize_w3a8_convrot(weight_f32: torch.Tensor):
+    """
+    W3A8: AsymW4A8Int8Layout at bits=3, from comfy-kitchen#303.
 
-        if "group_size" in sig.parameters:
-            kwargs["group_size"] = W6A8_GROUP_SIZE
-        elif "quant_group_size" in sig.parameters:
-            kwargs["quant_group_size"] = W6A8_GROUP_SIZE
+    Storage is 3K/8 bytes per output row: a 2-bit plane of the low two bits
+    (K/4 bytes) followed by a 1-bit plane of the top bit (K/8 bytes). The code
+    is decoded through an 8-entry codebook, so the layout emits its own
+    ``_codebook`` tensor (the PR's frozen Lloyd-Max LUT8) next to the group
+    scales. At ~1.3x lower weight error than 4-bit's 4K/8 rows, at 75% of the
+    bytes -- and roughly 3x the error of 5-bit, which is the trade this format
+    exists to make. Requires a comfy-kitchen build containing that PR; the
+    probe raises instead of writing a file nothing can load.
+    """
+    return _quantize_asym_wxa8_convrot(
+        weight_f32,
+        bits=W3A8_BITS,
+        group_size=W3A8_GROUP_SIZE,
+        convrot_groupsize=W3A8_CONVROT_GROUPSIZE,
+        codebook=W3A8_CODEBOOK,
+        label="W3A8",
+        pr_hint="Comfy-Org/comfy-kitchen#303, 'Add w3 and w5 quantization formats'",
+    )
 
-        if "convrot_groupsize" in sig.parameters:
-            kwargs["convrot_groupsize"] = W6A8_CONVROT_GROUPSIZE
 
-        if "convrot" in sig.parameters:
-            kwargs["convrot"] = True
+def quantize_w5a8_convrot(weight_f32: torch.Tensor):
+    """
+    W5A8: AsymW4A8Int8Layout at bits=5, from comfy-kitchen#303.
 
-        if "symmetric" in sig.parameters:
-            kwargs["symmetric"] = W4A8_SYMMETRIC
-
-        return W4A8_LAYOUT.quantize(weight_f32, **kwargs)
-
-    except TypeError:
-        return W4A8_LAYOUT.quantize(
-            weight_f32,
-            bits=W6A8_BITS,
-            codebook=False,
-            group_size=W6A8_GROUP_SIZE,
-            convrot_groupsize=W6A8_CONVROT_GROUPSIZE,
-            symmetric=W4A8_SYMMETRIC,
-        )
+    Storage is 5K/8 bytes per output row: the usual nibble plane (K/2 bytes)
+    plus a 1-bit plane of the top bit (K/8 bytes). 5-bit is uniform -15..15 with
+    no codebook, like 6-bit but half a byte per row narrower -- worth picking
+    over 6-bit when the extra 2.5% relative error is acceptable, and over 4-bit
+    when the ~2x better error is worth the +25% bytes.
+    """
+    return _quantize_asym_wxa8_convrot(
+        weight_f32,
+        bits=W5A8_BITS,
+        group_size=W5A8_GROUP_SIZE,
+        convrot_groupsize=W5A8_CONVROT_GROUPSIZE,
+        codebook=W5A8_CODEBOOK,
+        label="W5A8",
+        pr_hint="Comfy-Org/comfy-kitchen#303, 'Add w3 and w5 quantization formats'",
+    )
 
 
 def quantize_awq_w4a16(weight_f32: torch.Tensor, group_size: int = AWQ_W4A16_GROUP_SIZE):
@@ -1170,13 +1314,15 @@ def dequantize_input(sd, metadata):
                 "svdq_l2 branches). Use a higher-precision source model."
             )
 
-        if fmt in ("nvfp4", "mxfp8", "convrot_w4a4", "w4a4", "asym_w4a8_int8", "w6a8_int8", "awq_w4a16"):
+        if fmt in ("nvfp4", "mxfp8", "convrot_w4a4", "w4a4", "asym_w4a8_int8", "w3a8_int8",
+                   "w5a8_int8", "w6a8_int8", "awq_w4a16"):
             raise ValueError(
                 f"Input model contains {fmt} layers ('{layer}'), "
                 "which cannot be dequantized losslessly. Use a higher precision source model."
             )
 
-        if info.get("convrot") and fmt not in ("convrot_w4a4", "w4a4", "asym_w4a8_int8", "w6a8_int8"):
+        if info.get("convrot") and fmt not in ("convrot_w4a4", "w4a4", "asym_w4a8_int8",
+                                               "w3a8_int8", "w5a8_int8", "w6a8_int8"):
             raise ValueError(
                 f"Input model contains ConvRot-rotated INT8 layers ('{layer}'). "
                 "Use a higher precision source model."
@@ -1553,6 +1699,8 @@ class StarUltimateModelConverter:
         is_pruned_format = target_format.endswith("_pruned")
         is_w4a8 = target_format in ("w4a8_convrot", "w4a8_convrot_pruned")
         is_w6a8 = target_format in ("w6a8_convrot", "w6a8_convrot_pruned")
+        is_w3a8 = target_format in ("w3a8_convrot", "w3a8_convrot_pruned")
+        is_w5a8 = target_format in ("w5a8_convrot", "w5a8_convrot_pruned")
         is_awq_w4a16 = target_format == "awq_w4a16"
         is_w4a4 = target_format == "w4a4"
         is_w8a16 = target_format in W8A16_TARGET_FORMATS
@@ -1606,6 +1754,26 @@ class StarUltimateModelConverter:
                         "quantize() accepts a 'bits' parameter. W6A8 landed in "
                         "comfy-kitchen#191 (merged commit e33c9bd) -- update comfy-kitchen "
                         "to a build that includes it."
+                    )
+
+            elif is_w3a8 or is_w5a8:
+                _wxa8_bits = W3A8_BITS if is_w3a8 else W5A8_BITS
+                _wxa8_codebook = W3A8_CODEBOOK if is_w3a8 else W5A8_CODEBOOK
+                _wxa8_label = "W3A8" if is_w3a8 else "W5A8"
+
+                if not W4A8_AVAILABLE:
+                    raise ValueError(
+                        f"{_wxa8_label} requires comfy-kitchen with AsymW4A8Int8Layout "
+                        "(same class W4A8 uses). Update comfy-kitchen or use a build that "
+                        "includes it."
+                    )
+
+                if not _probe_wxa8_bits(_wxa8_bits, _wxa8_codebook):
+                    raise ValueError(
+                        f"{_wxa8_label} requires a comfy-kitchen build with {_wxa8_bits}-bit "
+                        "AsymW4A8Int8Layout support (Comfy-Org/comfy-kitchen#303). The installed "
+                        "build only accepts bits=4 and bits=6. Install a comfy-kitchen build "
+                        f"that contains that PR before converting to {target_format}."
                     )
 
             elif is_awq_w4a16:
@@ -2323,7 +2491,26 @@ class StarUltimateModelConverter:
 
                         continue
 
-                    if is_w6a8:
+                    if is_w3a8 or is_w5a8 or is_w6a8:
+                        if is_w3a8:
+                            _wxa8_label = "W3A8"
+                            _wxa8_fmt_name = W3A8_FORMAT_NAME
+                            _wxa8_group_size = W3A8_GROUP_SIZE
+                            _wxa8_convrot_gs = W3A8_CONVROT_GROUPSIZE
+                            _wxa8_quantize = quantize_w3a8_convrot
+                        elif is_w5a8:
+                            _wxa8_label = "W5A8"
+                            _wxa8_fmt_name = W5A8_FORMAT_NAME
+                            _wxa8_group_size = W5A8_GROUP_SIZE
+                            _wxa8_convrot_gs = W5A8_CONVROT_GROUPSIZE
+                            _wxa8_quantize = quantize_w5a8_convrot
+                        else:
+                            _wxa8_label = "W6A8"
+                            _wxa8_fmt_name = W6A8_FORMAT_NAME
+                            _wxa8_group_size = W6A8_GROUP_SIZE
+                            _wxa8_convrot_gs = W6A8_CONVROT_GROUPSIZE
+                            _wxa8_quantize = quantize_w6a8_convrot
+
                         if active_w4a8_blacklist and any(name in k for name in active_w4a8_blacklist):
                             target_dtype = blacklisted_dtype(
                                 k,
@@ -2331,26 +2518,27 @@ class StarUltimateModelConverter:
                                 active_w4a8_keep_fp16 or active_keep_fp16,
                             )
                             new_sd[k] = v.to(dtype=target_dtype)
-                            counts["w6a8_blacklisted"] += 1
+                            counts[f"{_wxa8_label.lower()}_blacklisted"] += 1
                             continue
 
-                        print(f"💎 W6A8_CONVROT: {k}")
+                        print(f"💎 {_wxa8_label}_CONVROT: {k}")
 
                         try:
                             v_tensor_ready = v_tensor.float().contiguous()
-                            qdata, params = quantize_w6a8_convrot(v_tensor_ready)
+                            qdata, params = _wxa8_quantize(v_tensor_ready)
                             tensors = W4A8_LAYOUT.state_dict_tensors(qdata, params)
 
                             # Same tensor-suffix contract as W4A8 (weight_s_rel /
-                            # weight_s_channel) -- ComfyUI's loader treats both
-                            # formats identically apart from the bit-width check.
+                            # weight_s_channel, plus weight_codebook at bits=3) --
+                            # ComfyUI's loader treats these formats identically apart
+                            # from the bit width it infers from the packed row.
                             store_w4a8_quantized_weight(new_sd, k, tensors)
 
                             quant_map["layers"][base_k_meta] = {
-                                "format": W6A8_FORMAT_NAME,
-                                "group_size": W6A8_GROUP_SIZE,
+                                "format": _wxa8_fmt_name,
+                                "group_size": _wxa8_group_size,
                                 "convrot": True,
-                                "convrot_groupsize": W6A8_CONVROT_GROUPSIZE,
+                                "convrot_groupsize": _wxa8_convrot_gs,
                             }
 
                             counts[target_format] += 1
@@ -2359,11 +2547,11 @@ class StarUltimateModelConverter:
                                 del v_tensor, v_tensor_ready
 
                         except Exception as e:
-                            print(f"⚠️ W6A8 ConvRot failed for {k}: {e}")
+                            print(f"⚠️ {_wxa8_label} ConvRot failed for {k}: {e}")
 
                             if v.dtype.is_floating_point:
                                 new_sd[k] = v.to(dtype=torch.bfloat16)
-                                counts["w6a8_failed_bf16"] += 1
+                                counts[f"{_wxa8_label.lower()}_failed_bf16"] += 1
                             else:
                                 new_sd[k] = v
                                 counts["kept"] += 1
@@ -2565,13 +2753,13 @@ class StarUltimateModelConverter:
                         new_sd[k] = v
                         counts["kept"] += 1
 
-        if is_w4a8 and any(
+        if (is_w4a8 or is_w3a8 or is_w5a8 or is_w6a8) and any(
             conf.get("format") == "nvfp4" for conf in quant_map["layers"].values()
         ):
             raise RuntimeError(
-                "W4A8 target selected but NVFP4 layers were produced -- layers escaped the "
-                "W4A8 path into the generic fallback. Aborting instead of writing a broken "
-                "file. Check the target_format string and the W4A8 block above."
+                f"{target_format} selected but NVFP4 layers were produced -- layers escaped "
+                "the WxAy block into the generic fallback. Aborting instead of writing a "
+                "broken file. Check the target_format string and the WxAy block above."
             )
         new_sd = {k: v for k, v in new_sd.items() if not k.endswith(".comfy_quant")}
 

@@ -83,6 +83,18 @@ The Star Ultimate Model Converter provides advanced quantization capabilities fo
 - **Hardware**: SM 8.0+ (Ampere/Ada/Blackwell)
 - **Best for**: Maximum compression with rotation
 
+### W3A8 / W5A8 ConvRot (3/5-bit codes, INT8 activations)
+- **Size**: ~19% (3-bit) / ~31% (5-bit) of the bf16 original
+- **Quality**: 3-bit is coarse (~15% mean relative error on random weights, roughly 3× W5A8);
+  5-bit sits between W4A8 and W6A8 (~4%, ~2× better than 4-bit)
+- **Storage**: 3-bit packs a 2-bit plane plus a 1-bit plane (`K*3/8` bytes per row) and decodes
+  through an 8-entry codebook, so the file also carries `weight_codebook`; 5-bit packs the nibble
+  plane plus a 1-bit plane (`K*5/8` bytes per row) with uniform −15..15 levels and no codebook
+- **Hardware**: needs a comfy-kitchen build containing
+  [PR #303](https://github.com/Comfy-Org/comfy-kitchen/pull/303); ComfyUI also needs the matching
+  `w3a8_int8` / `w5a8_int8` loader registration before these files load
+- **Best for**: experimenting between the existing 4- and 6-bit points; check output visually
+
 ### FP16 (Half Precision)
 - **Size**: ~50% of FP32
 - **Quality**: Excellent
