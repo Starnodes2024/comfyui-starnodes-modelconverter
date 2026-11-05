@@ -1351,6 +1351,40 @@
       "w4a8_keep_fp16": [],
       "nvfp4_group_size": null,
       "preserve_extended_metadata": false
+    },
+    "P-H3-Image": {
+      "_note": "PrunaAI/P-H3-Image-Comfy, the MiniMax-H3 based 8 MP image model (50 blocks + token_refiner). Matches the official int8_convrot layout: only blocks.N.attn.qkv_proj, attn.out_proj, mlp.fc1 and mlp.fc2 are quantized (200 layers); adaln_proj/adaln_t_table, rope.inv_freq, the patch projectors and final_layer.{adaln_proj,video_out,audio_out} stay F32, and norms, token_refiner, condition_proj and all biases stay BF16. 40.5 GB bf16 -> 21.2 GB int8_convrot. Official w4a8 additionally keeps blocks 29-36 and the token_refiner at int8 (this profile quantizes every block linear to 4-bit instead).",
+      "blacklist": [
+        "norm",
+        "adaln",
+        "patch_proj",
+        "condition_proj",
+        "final_layer",
+        "token_refiner",
+        "rope",
+        "bias"
+      ],
+      "fp8_layers": [],
+      "force_int8_layers": [],
+      "awq_prescale_layers": [],
+      "pruned_extra_blacklist": [],
+      "int8_convrot_layers": [],
+      "int4_convrot_layers": [],
+      "keep_fp32": [
+        "adaln",
+        "rope",
+        "video_patch_proj",
+        "audio_patch_proj",
+        "final_layer.video_out",
+        "final_layer.audio_out",
+        "final_layer.adaln_proj"
+      ],
+      "keep_fp16": [],
+      "w4a8_blacklist": [],
+      "w4a8_keep_fp32": [],
+      "w4a8_keep_fp16": [],
+      "nvfp4_group_size": null,
+      "preserve_extended_metadata": false
     }
   }
 }
