@@ -133,7 +133,7 @@ short, convert on `cpu` — slower, same result.
 | `checkpoint` | File from `models/checkpoints` (Checkpoint / AIO modes) |
 | `text_encoder` | File from `models/text_encoders` (Text-Encoder mode) |
 | `vae` | File from `models/vae` (VAE mode) |
-| `model_type` | Architecture profile — 45 available, see [Supported models](#supported-models) |
+| `model_type` | Architecture profile — 46 available, see [Supported models](#supported-models) |
 | `target_format` | See [Target formats](#target-formats) |
 | `device` | `cuda` (fast) or `cpu` (works with any VRAM budget) |
 | `custom_path` | *(optional)* File, shard folder or HF snapshot dir, used with `mode` = Custom Path. Must be inside a ComfyUI model folder (path-traversal guard) |
@@ -246,7 +246,7 @@ NVFP4 and some in INT4 within one file. `target_quant_format` accepts `NVFP4`, `
 
 ## Supported models
 
-45 profiles ship in `models.json`:
+46 profiles ship in `models.json`:
 
 - **Flux**: Flux1 / Flux2, Flux 2 Tight, Flux 3 Klein, Flux 3 Klein MaxQ
 - **Qwen**: Qwen-Image, Qwen-Image W4A8, Qwen-Image-2.1, Qwen-Image-2.1 MaxQ
@@ -254,7 +254,8 @@ NVFP4 and some in INT4 within one file. `target_quant_format` accepts `NVFP4`, `
 - **Krea**: Krea-2 · **Wan**: Wan (All Versions) · **LTX**: LTX-Video, LTX-2.5, `ltx25_gemma4_te`, `ltx25_vae`
 - **MiniMax-H3**: `minimax_h3`, `minimax_h3_ref_nvfp4_fp8`, `minimax_h3_ref_nvfp4_int8convrot`,
   `minimax_h3_int4_tensorwise_experimental`, `minimax_h3_int8convrot_int4fc2`,
-  `minimax_h3_int8convrot_int4mlp`, `minimax_h3_te`, `minimax_h3_vae`
+  `minimax_h3_int8convrot_int4mlp`, `minimax_h3_te`, `minimax_h3_vae`, plus **P-H3-Image**
+  (PrunaAI's 8 MP image model, reproduces its official int8 ConvRot layout)
 - **MOSS**: MOSS-Image, MOSS-Image MaxQ · **Fibo**: Fibo-2.0-edit-turbo, HQ, MaxQ
 - **SeedVR**: SeedVR (All Versions), SeedVR MaxQ · **Ideogram-4** · **Chroma** · **Anima**
 - **Ming-Image** · **ERNIE-Image** · **Boogu-Image** · **Lens** · **ACE-Step** · **YuE2**
