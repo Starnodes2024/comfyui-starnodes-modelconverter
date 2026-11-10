@@ -141,7 +141,7 @@ short, convert on `cpu` — slower, same result.
 | `gguf_arch` | *(optional)* Architecture string written into the GGUF header (must be in ComfyUI-GGUF's whitelist) |
 | `llama_quantize_bin` | *(optional)* Path to `llama-quantize` for K-quant GGUF targets |
 | `keep_intermediate_gguf` | *(optional)* Keep the F16/BF16 intermediate GGUF |
-| `learned_rounding` | *(optional)* Refine FP8 / INT8 ConvRot rounding by gradient descent on the weight's own top-k SVD subspace (calibration-free, **much** slower) |
+| `learned_rounding` | *(optional)* Refine FP8 / INT8 ConvRot rounding by gradient descent on the weight's own top-k SVD subspace (calibration-free, **much** slower). Off by default and usually not worth it: per-element nearest rounding is already optimal for the global weight error, so this can only trade it for subspace error (~1–4 %), and it changes nothing unless `learned_rounding_lr` is high enough for the delta to cross half a quantization step |
 | `learned_rounding_iters` / `_lr` / `_topk_ratio` | *(optional)* Learned-rounding controls (10–5000 steps, AdamW lr, subspace ratio) |
 
 ### Modes
