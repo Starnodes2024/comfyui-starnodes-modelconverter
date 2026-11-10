@@ -2188,7 +2188,10 @@ class StarUltimateModelConverter:
                                     learned_rounding_topk_ratio=learned_rounding_topk_ratio,
                                 )
                                 new_sd[k] = qdata.cpu()
-                                new_sd[f"{base_k_file}.weight_scale"] = scale.to(torch.bfloat16).cpu()
+                                # Keep the per-row scale in F32, matching TensorWiseINT8Layout.state_dict_tensors
+                                # and the official int8_convrot files: bf16 scales have an 8-bit
+                                # mantissa and buy only ~2 MB across the whole file.
+                                new_sd[f"{base_k_file}.weight_scale"] = scale.to(torch.float32).cpu()
                                 if is_w8a16:
                                     as_w8a16_conf(quant_conf)
                                 quant_map["layers"][base_k_meta] = quant_conf
@@ -2639,7 +2642,10 @@ class StarUltimateModelConverter:
                                 learned_rounding_topk_ratio=learned_rounding_topk_ratio,
                             )
                             new_sd[k] = qdata.cpu()
-                            new_sd[f"{base_k_file}.weight_scale"] = scale.to(torch.bfloat16).cpu()
+                            # Keep the per-row scale in F32, matching TensorWiseINT8Layout.state_dict_tensors
+                            # and the official int8_convrot files: bf16 scales have an 8-bit
+                            # mantissa and buy only ~2 MB across the whole file.
+                            new_sd[f"{base_k_file}.weight_scale"] = scale.to(torch.float32).cpu()
                             if is_w8a16:
                                 as_w8a16_conf(quant_conf)
                             quant_map["layers"][base_k_meta] = quant_conf
