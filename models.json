@@ -1385,6 +1385,39 @@
       "w4a8_keep_fp16": [],
       "nvfp4_group_size": null,
       "preserve_extended_metadata": false
+    },
+    "minimax_h3_image": {
+      "_note": "Comfy-Org/MiniMax-H3-Image, the MiniMax-H3 based 16 MP image model (50 blocks + 2-layer token_refiner, no audio layers). Derived from the official pruned int8_convrot header: only blocks.N.attn.qkv_proj, attn.out_proj, mlp.fc1 and mlp.fc2 are quantized (200 layers, I8, per-row F32 weight_scale + per-module comfy_quant). Kept exactly as in the bf16 source: F32 adaln_t_table, rope.inv_freq, video_patch_proj.{weight,bias}, final_layer.video_out.{weight,bias}; F16 every *.adaln_proj.linear.weight (biases stay BF16); BF16 the norms, condition_proj, token_refiner (both blocks, unquantized), final_layer.norm and all biases; the uint8 blocks.N.attn.comfy_attention.config blobs pass through untouched. 38.4 GB bf16 -> 20.0 GB int8_convrot. The official w4a8 file keeps the same 200 layers on a 16-level codebook and is not reproduced by this profile.",
+      "blacklist": [
+        "norm",
+        "adaln",
+        "patch_proj",
+        "condition_proj",
+        "final_layer",
+        "token_refiner",
+        "rope",
+        "bias"
+      ],
+      "fp8_layers": [],
+      "force_int8_layers": [],
+      "awq_prescale_layers": [],
+      "pruned_extra_blacklist": [],
+      "int8_convrot_layers": [],
+      "int4_convrot_layers": [],
+      "keep_fp32": [
+        "adaln_t_table",
+        "rope.inv_freq",
+        "video_patch_proj",
+        "final_layer.video_out"
+      ],
+      "keep_fp16": [
+        "adaln_proj.linear.weight"
+      ],
+      "w4a8_blacklist": [],
+      "w4a8_keep_fp32": [],
+      "w4a8_keep_fp16": [],
+      "nvfp4_group_size": null,
+      "preserve_extended_metadata": false
     }
   }
 }
