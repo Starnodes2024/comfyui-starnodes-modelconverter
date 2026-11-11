@@ -195,6 +195,8 @@ MODEL_TYPE_TO_GGUF_ARCH = {
 
 GGUF_MAX_TENSOR_NAME_LENGTH = 127
 GGUF_MAX_TENSOR_DIMS = 4
+# A hung llama-quantize otherwise blocks the ComfyUI worker forever.
+KQUANT_TIMEOUT_SECONDS = 3600
 
 MINIMAX_H3_BOUNDARY_BLOCKS = {0, 1, 47, 48, 49}
 MINIMAX_H3_NVFP4_GROUPSIZE = 16
@@ -266,17 +268,26 @@ AWQ_W4A16_FORMAT_NAME = "awq_w4a16"
 PRECISION_RE = re.compile(
     r"[-_.]("
     r"fp32|fp16|bf16|mxfp8|"
-    r"fp8(?:_e[45]m[23](?:fn)?)(?:_scaled)?(?:_fast)?|"
+    r"fp8(?:_e[45]m[23](?:fn|fnuz)?)?(?:_scaled)?(?:_fast)?|"
     r"int[48](?:_convrot)?(?:_tensorwise)?(?:_pruned)?|"
     r"w[3456]a8(?:_convrot)?(?:_pruned)?|"
     r"w8a16(?:_convrot)?(?:_pruned)?|"
     r"awq_w4a16|"
-    r"nvfp4|svdquant_w4a4|w4a4"
+    r"nvfp4|svdquant_w4a4|w4a4|minimax_h3_native_mix"
     r")(?=[-_.]|$)",
     re.IGNORECASE,
 )
 
-FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
+# ROCm/AWQ toolchains can emit the fnuz variants; without them those tensors are
+# treated as ordinary floats and pass through un-dequantized.
+FP8_DTYPES = tuple(
+    d for d in (
+        torch.float8_e4m3fn,
+        torch.float8_e5m2,
+        getattr(torch, "float8_e4m3fnuz", None),
+        getattr(torch, "float8_e5m2fnuz", None),
+    ) if d is not None
+)
 E8M0_DTYPE = getattr(torch, "float8_e8m0fnu", None)
 
 DTYPE_NAMES = {
@@ -347,18 +358,19 @@ def resolve_input(mode, diffusion_model, checkpoint, text_encoder, custom_path, 
         if not custom_path:
             raise ValueError("Mode is 'Custom Path' but no custom path was provided.")
 
-        src = os.path.abspath(os.path.expanduser(custom_path))
-        # [SECURITY PATCH] path traversal guard v3
+        src = os.path.realpath(os.path.expanduser(custom_path))
+        # [SECURITY PATCH] path traversal guard v3 (realpath: a symlink inside a
+        # model folder must not resolve outside it)
         allowed_dirs = []
         for _fps in folder_paths.folder_names_and_paths.values():
-            allowed_dirs.extend([os.path.abspath(p) for p in _fps[0]])
-        allowed_dirs.append(os.path.abspath(os.path.dirname(folder_paths.__file__)))
+            allowed_dirs.extend([os.path.realpath(p) for p in _fps[0]])
+        allowed_dirs.append(os.path.realpath(os.path.dirname(folder_paths.__file__)))
         def _star_within(_p):
-            _p = os.path.normcase(os.path.abspath(_p))
+            _p = os.path.normcase(os.path.realpath(_p))
             for _d in allowed_dirs:
                 if not _d:
                     continue
-                _b = os.path.normcase(os.path.abspath(_d))
+                _b = os.path.normcase(os.path.realpath(_d))
                 if _p == _b or _p.startswith(_b + os.sep):
                     return True
             return False
@@ -442,10 +454,15 @@ def resolve_input(mode, diffusion_model, checkpoint, text_encoder, custom_path, 
 
 
 def diffusion_models_dir():
-    paths = folder_paths.get_folder_paths("diffusion_models")
+    paths = folder_paths.get_folder_paths("diffusion_models") or []
     for p in paths:
         if os.path.basename(os.path.normpath(p)) == "diffusion_models":
             return p
+    if not paths:
+        raise ValueError(
+            "No 'diffusion_models' folder is registered with ComfyUI, so there is "
+            "nowhere to write the converted model."
+        )
     return paths[0]
 
 
@@ -544,7 +561,7 @@ def build_hadamard(size: int, device="cpu", dtype: torch.dtype = torch.float32) 
     if size < 4 or (size & (size - 1)) != 0:
         raise ValueError(f"Hadamard size must be a power of 2, got {size}")
 
-    is_power_of_4 = (math.log(size, 4) % 1 == 0)
+    is_power_of_4 = (size.bit_length() - 1) % 2 == 0
     if not is_power_of_4:
         from scipy.linalg import hadamard as scipy_hadamard
         h_np = scipy_hadamard(size)
@@ -584,6 +601,19 @@ def resolve_int8_convrot_group_size(in_features: int, requested_group_size: int)
     if requested_group_size == 256 and in_features % 64 == 0:
         return 64
     return None
+
+
+def _required_convrot_gs(in_features: int) -> int:
+    """ConvRot W4A4/W4A8 have no unrotated mode: a layer with no usable 256/64
+    group must fail loudly instead of being quantized with a group size the
+    layout will reject (the caller degrades it to bf16 and counts the failure)."""
+    gs = resolve_int8_convrot_group_size(in_features, CONVROT_GROUPSIZE)
+    if gs is None:
+        raise ValueError(
+            f"in_features {in_features} is not divisible by 64; "
+            "ConvRot W4A4/W4A8 needs a rotate group of 256 or 64"
+        )
+    return gs
 
 
 def as_w8a16_conf(layer_conf):
@@ -692,19 +722,33 @@ def learned_round_refine(
         m, n = weight_f32.shape
         k = max(1, min(int(min(m, n) * topk_ratio), min(m, n)))
 
+        # The refinement adds a sub-step offset to the rounded value and then
+        # re-quantizes, so "round" must mean the TARGET's own grid. int8 is a unit
+        # grid -- round before the cast. float8_e4m3fn is not (0.125 steps in
+        # [1,2), 8 in [64,128)): rounding to integers first discards mantissa bits
+        # and zeroes everything below half a step, which made the fp8 path
+        # measurably WORSE than plain rounding (+3.3% weight error, 23% of
+        # weights changed, 200 iters). For float targets, clamp only and let the
+        # cast round.
+        is_fp = target_dtype.is_floating_point
+        clamp_min = torch.finfo(target_dtype).min if is_fp else -127
+        clamp_max = torch.finfo(target_dtype).max if is_fp else 127
+
+        def _to_grid(x):
+            if not is_fp:
+                x = x.round()
+            return x.clamp(clamp_min, clamp_max).to(target_dtype).to(torch.float32)
+
         with torch.no_grad():
             try:
                 u, s, v = torch.svd_lowrank(weight_f32, q=min(k + 8, min(m, n)), niter=2)
                 u_k, vh_k = u[:, :k].contiguous(), v[:, :k].transpose(-2, -1).contiguous()
             except Exception:
                 # Degenerate (all-zero / non-finite) tensor: no SVD subspace to
-                # project onto, so just return the naive rounding untouched.
-                return (weight_f32 * scale).round().clamp(
-                    torch.finfo(target_dtype).min if target_dtype.is_floating_point else -128,
-                    torch.finfo(target_dtype).max if target_dtype.is_floating_point else 127,
-                ).to(target_dtype)
+                # project onto, so just return the naive quantization untouched.
+                return _to_grid(weight_f32 * scale)
 
-            w_rounded = (weight_f32 * scale).round().to(target_dtype).to(torch.float32)
+            w_rounded = _to_grid(weight_f32 * scale)
 
         delta = torch.zeros_like(w_rounded, requires_grad=True)
         optimizer = torch.optim.AdamW([delta], lr=lr)
@@ -720,24 +764,21 @@ def learned_round_refine(
             loss = torch.linalg.norm(projected_error)
             if not torch.isfinite(loss):
                 break
-            loss.backward()
-            optimizer.step()
             loss_val = loss.item()
             if loss_val < best_loss:
                 best_loss = loss_val
                 best_delta = delta.detach().clone()
+            loss.backward()
+            optimizer.step()
 
     with torch.no_grad():
-        refined = (w_rounded + best_delta)
-        clamp_min = torch.finfo(target_dtype).min if target_dtype.is_floating_point else -128
-        clamp_max = torch.finfo(target_dtype).max if target_dtype.is_floating_point else 127
-        # w_rounded holds integers and best_delta is a sub-step offset, so the
-        # cast to target_dtype must round: a bare .to() truncates toward zero and
-        # therefore shifts every weight whose delta points toward zero by a full
-        # quantization step (measured on Qwen3.5-9B: ~49% of all weights moved one
-        # LSB, +155% relative weight error versus plain round-to-nearest). With
-        # the round, a weight only changes grid value once its delta crosses 0.5.
-        return refined.round().clamp(clamp_min, clamp_max).to(target_dtype)
+        # w_rounded holds grid values and best_delta is a sub-step offset, so the
+        # final re-quantization has to use the same grid as _to_grid(): a bare
+        # .to() truncates toward zero for int8 and therefore shifts every weight
+        # whose delta points toward zero by a full LSB (measured on Qwen3.5-9B:
+        # ~49% of all weights moved one LSB, +155% relative weight error versus
+        # plain round-to-nearest).
+        return _to_grid(w_rounded + best_delta)
 
 
 def compute_awq_prescale(weight: torch.Tensor, alpha: float = AWQ_PRESCALE_ALPHA) -> torch.Tensor:
@@ -759,6 +800,9 @@ def pack_int4_nibbles(q: torch.Tensor) -> torch.Tensor:
 
 
 def block_index_from_key(k: str):
+    # AIO checkpoints keep the 'model.diffusion_model.' prefix on tensor keys.
+    if k.startswith(AIO_MODEL_PREFIX):
+        k = k[len(AIO_MODEL_PREFIX):]
     if not k.startswith("blocks."):
         return None
 
@@ -893,8 +937,8 @@ def shard_index_keys(files):
     return set(weight_map)
 
 
-def load_input(files):
-    expected_keys = shard_index_keys(files)
+def load_input(files, check_shards=True):
+    expected_keys = shard_index_keys(files) if check_shards else None
 
     sd = {}
 
@@ -910,6 +954,18 @@ def load_input(files):
                 part = comfy.utils.load_torch_file(fp, safe_load=False)
             else:
                 raise
+        # A plain state dict can be wrapped by a training/serialization dump
+        # ("state_dict", "module", "model"). Unwrap it before anything looks at
+        # v.dtype, otherwise detect_input_format() dies with AttributeError.
+        if len(part) <= 3:
+            for wrapper in ("state_dict", "module", "model"):
+                inner = part.get(wrapper)
+                if isinstance(inner, dict) and any(
+                    isinstance(t, torch.Tensor) for t in inner.values()
+                ):
+                    print(f"🔓 Unwrapping nested '{wrapper}' mapping in {os.path.basename(fp)}")
+                    part = inner
+                    break
         for _nk in [_k for _k in part if not isinstance(part[_k], torch.Tensor)]:
             print(f"⚠️ Skipping non-tensor entry '{_nk}' ({type(part[_nk]).__name__}) in {os.path.basename(fp)}")
             del part[_nk]
@@ -969,6 +1025,33 @@ def assign_quantized_tensor(new_sd, key, tensor):
         new_sd[key] = tensor.cpu()
 
 
+def _dedupe_save_tensors(new_sd):
+    """Make a state dict safe for safetensors.save_file().
+
+    save_file() refuses two tensors that share storage and any non-contiguous
+    tensor. The passthrough branches keep the input object when its dtype already
+    matches (``.to()`` is a no-op then), so a pickle checkpoint with tied weights,
+    or a transposed source tensor, would otherwise abort at save time with a
+    confusing "some tensors share memory" / "non-contiguous" error.
+    """
+    seen = set()
+    for key, value in list(new_sd.items()):
+        if not isinstance(value, torch.Tensor) or value.numel() == 0:
+            continue
+        try:
+            ptr = value.untyped_storage().data_ptr()
+        except Exception:
+            continue
+        if ptr in seen:
+            new_sd[key] = value.clone()
+            value = new_sd[key]
+        elif not value.is_contiguous():
+            new_sd[key] = value.contiguous()
+            value = new_sd[key]
+        seen.add(value.untyped_storage().data_ptr())
+    return new_sd
+
+
 def store_quantized_weight(new_sd, original_weight_key, tensors):
     for suffix, tensor in tensors.items():
         if suffix == ".comfy_quant":
@@ -1009,6 +1092,12 @@ def store_w4a8_quantized_weight(new_sd, original_weight_key, tensors):
             print(f"⚠️ W4A8: unrecognized tensor suffix '{suffix}' for {original_weight_key}, storing as-is")
             canonical = suffix if suffix.startswith((".", "_")) else f".{suffix}"
 
+        if canonical in mapped:
+            raise RuntimeError(
+                f"W4A8: tensor suffix collision for '{original_weight_key}' -- "
+                f"'{suffix}' and an earlier suffix both map to '{canonical}' "
+                f"(all suffixes: {seen_suffixes}). Refusing to drop one of them."
+            )
         mapped[canonical] = tensor
 
     if "_s_rel" not in mapped:
@@ -1047,6 +1136,12 @@ def store_awq_w4a16_quantized_weight(new_sd, original_weight_key, tensors):
             print(f"⚠️ AWQ W4A16: unrecognized tensor suffix '{suffix}' for {original_weight_key}, storing as-is")
             canonical = suffix if suffix.startswith((".", "_")) else f".{suffix}"
 
+        if canonical in mapped:
+            raise RuntimeError(
+                f"AWQ W4A16: tensor suffix collision for '{original_weight_key}' -- "
+                f"'{suffix}' and an earlier suffix both map to '{canonical}' "
+                f"(all suffixes: {seen_suffixes}). Refusing to drop one of them."
+            )
         mapped[canonical] = tensor
 
     if "_scale" not in mapped or "_zero" not in mapped:
@@ -1122,7 +1217,7 @@ def _probe_wxa8_bits(bits: int, codebook: bool) -> bool:
 
     if W4A8_AVAILABLE and "bits" in inspect.signature(W4A8_LAYOUT.quantize).parameters:
         try:
-            probe = torch.zeros(16, 256, dtype=torch.float32)
+            probe = torch.randn(16, 256, dtype=torch.float32)  # randn: all-zero input takes a degenerate amax=0 path
             W4A8_LAYOUT.quantize(
                 probe,
                 bits=bits,
@@ -1363,6 +1458,25 @@ def dequantize_input(sd, metadata):
         if v.dtype in FP8_DTYPES:
             sd[k] = v.to(torch.bfloat16)
 
+    # Stray scales: a bf16 (or already-dequantized) weight can still carry the
+    # companion tensors of a format we did not need to dequantize. They are 2-D
+    # (out, 1) / 1-D and would otherwise be picked up by the main loop as if they
+    # were weights (bug: 'foo.weight_scale' contains '.weight').
+    stray_suffixes = (
+        ".weight_scale", ".weight_scale_2", ".scale_weight", ".scale_input",
+        ".pre_quant_scale", ".input_scale", ".svdq_l1", ".svdq_l2",
+        "_scale", ".weight_zero", ".weight_codebook", ".weight_s_rel",
+        ".weight_s_channel",
+    )
+    dropped = []
+    for k in list(sd.keys()):
+        if any(k.endswith(sfx) for sfx in stray_suffixes):
+            sd.pop(k)
+            dropped.append(k)
+    if dropped:
+        print(f"🧹 Dropped {len(dropped)} leftover scale/quant companion tensor(s) "
+              f"(e.g. '{dropped[0]}') so they are not quantized as weights.")
+
     return sd
 
 
@@ -1397,7 +1511,13 @@ def find_llama_quantize_binary(explicit_path=None):
 
 
 def _gguf_default_qtype(torch_dtype):
-    return gguf.GGMLQuantizationType.BF16 if torch_dtype == torch.bfloat16 else gguf.GGMLQuantizationType.F16
+    # "Default"/protected tensors keep their source precision: F32 stays F32
+    # (F16 would throw away 13 mantissa bits), bf16 stays BF16, fp16 stays F16.
+    if torch_dtype == torch.bfloat16:
+        return gguf.GGMLQuantizationType.BF16
+    if torch_dtype == torch.float32:
+        return gguf.GGMLQuantizationType.F32
+    return gguf.GGMLQuantizationType.F16
 
 
 def build_gguf_output_path(out_dir, base_name, target_format):
@@ -1608,8 +1728,9 @@ class StarUltimateModelConverter:
                             "(~1-4% there), and it changes nothing at all unless the deltas "
                             "grow past 0.5 of a step -- i.e. unless learned_rounding_lr is "
                             "roughly 0.5 or higher. At the default 0.01 the output is "
-                            "identical to plain rounding; leave this off unless you are "
-                            "deliberately testing it."
+                            "identical to plain rounding (measured: 0 of 131072 weights "
+                            "changed, and lr 0.1 changes none either); leave this off unless "
+                            "you are deliberately testing it."
                         ),
                     },
                 ),
@@ -1652,6 +1773,17 @@ class StarUltimateModelConverter:
                         "tooltip": "[learned_rounding only] Fraction of singular vectors used to weight the reconstruction loss. Higher = considers more of the weight's structure, slower.",
                     },
                 ),
+                "strict": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": (
+                            "Abort instead of writing a file when any layer falls back to "
+                            "full precision. Off by default: on ROCm, NVFP4/W4A4 have no "
+                            "HIP kernels, and the per-layer fallback is the normal outcome."
+                        ),
+                    },
+                ),
             },
         }
 
@@ -1681,6 +1813,7 @@ class StarUltimateModelConverter:
         learned_rounding_iters=LEARNED_ROUNDING_DEFAULT_ITERS,
         learned_rounding_lr=LEARNED_ROUNDING_DEFAULT_LR,
         learned_rounding_topk_ratio=LEARNED_ROUNDING_DEFAULT_TOPK_RATIO,
+        strict=False,
     ):
         target_format = target_format.strip()
 
@@ -1847,13 +1980,10 @@ class StarUltimateModelConverter:
 
             ckpt_path = folder_paths.get_full_path("checkpoints", checkpoint)
             base_name = os.path.splitext(os.path.basename(ckpt_path))[0]
-            orig_meta = None
 
-            if ckpt_path.endswith(".safetensors"):
-                with safetensors.safe_open(ckpt_path, framework="pt") as f:
-                    orig_meta = f.metadata()
-
-            full_sd = comfy.utils.load_torch_file(ckpt_path, safe_load=True)
+            # Same hardened loader the other modes use: safetensors metadata,
+            # .pt/.pth/.ckpt pickle fallback, non-tensor filtering, nested unwrap.
+            full_sd, orig_meta = load_input([ckpt_path], check_shards=False)
 
             if mode == "Checkpoint":
                 print(f"✂️ Extracting diffusion model from AIO checkpoint: {checkpoint}")
@@ -1863,6 +1993,13 @@ class StarUltimateModelConverter:
                     for k, v in full_sd.items()
                     if k.startswith(AIO_MODEL_PREFIX)
                 }
+
+                if not sd:
+                    raise ValueError(
+                        f"No '{AIO_MODEL_PREFIX}' keys in {checkpoint} — that is not an "
+                        "all-in-one checkpoint. Use 'Diffusion Model' mode for a plain "
+                        "diffusion model file, or 'AIO' to convert the whole checkpoint."
+                    )
 
                 input_bytes = sum(v.numel() * v.element_size() for v in sd.values())
                 output_path = (
@@ -1972,12 +2109,22 @@ class StarUltimateModelConverter:
             for i, (k, v) in enumerate(sd.items()):
                 pbar.update_absolute(i + 1)
 
-                if v.dtype.is_floating_point:
-                    new_sd[k] = v.to(target_dtype)
-                    counts[target_format] += 1
-                else:
+                if not v.dtype.is_floating_point:
                     new_sd[k] = v
                     counts["kept"] += 1
+                    continue
+
+                # Honour the profile's precision pins: a keep_fp32 layer stays F32
+                # even when the target is fp16, and keep_fp16 stays F16.
+                if keep_fp32 and any(name in k for name in keep_fp32):
+                    new_sd[k] = v.to(torch.float32)
+                    counts["fp32 pinned"] += 1
+                elif keep_fp16 and any(name in k for name in keep_fp16):
+                    new_sd[k] = v.to(torch.float16)
+                    counts["fp16 pinned"] += 1
+                else:
+                    new_sd[k] = v.to(target_dtype)
+                    counts[target_format] += 1
 
         else:
             for i, (k, v) in enumerate(sd.items()):
@@ -2055,16 +2202,17 @@ class StarUltimateModelConverter:
                         counts["kept"] += 1
                     continue
 
-                if v.ndim == 2 and ".weight" in k:
-                    base_k_file = k.replace(".weight", "")
-                    # Strip the AIO prefix from the metadata key so ComfyUI's
-                    # loader finds the .comfy_quant entry under the model's
-                    # internal (unprefixed) module path. Tensor keys below are
-                    # left untouched -- the loader strips those prefixes itself.
-                    if base_k_file.startswith(AIO_MODEL_PREFIX):
-                        base_k_meta = base_k_file[len(AIO_MODEL_PREFIX):]
-                    else:
-                        base_k_meta = base_k_file
+                if v.ndim == 2 and k.endswith(".weight"):
+                    base_k_file = k[:-len(".weight")]
+                    # Keep the AIO prefix on the comfy_quant record. ComfyUI's
+                    # load_model_weights() copies only the keys that start with
+                    # 'model.diffusion_model.' and strips that prefix while doing
+                    # so; an unprefixed '<layer>.comfy_quant' is therefore dropped
+                    # and the int8 payload is loaded as a raw bf16 weight. The
+                    # file-level _quantization_metadata uses this same key, so the
+                    # comfy_quant injection in convert_old_quants() lands on the
+                    # same path.
+                    base_k_meta = base_k_file
 
                     # [EMBED-GUARD] ComfyUI's format spec only accepts
                     # float8_e4m3fn, float8_e5m2, or int8_tensorwise for
@@ -2092,6 +2240,12 @@ class StarUltimateModelConverter:
                             continue
 
                     v_tensor = v.to(device=device, dtype=torch.bfloat16)
+                    # ConvRot rotation group for this layer: 256 -> 64 -> None,
+                    # matching the reference convrot.py. Every convrot branch below
+                    # uses this instead of the bare constant, and records it in the
+                    # layer metadata so the loader inverts the rotation correctly.
+                    _convrot_gs = resolve_int8_convrot_group_size(
+                        v_tensor.shape[1], CONVROT_GROUPSIZE)
 
                     if (
                         active_force_int8
@@ -2120,7 +2274,7 @@ class StarUltimateModelConverter:
 
                             if v.dtype.is_floating_point:
                                 new_sd[k] = v.to(dtype=torch.bfloat16)
-                                counts["kept bf16"] += 1
+                                counts["FAILED bf16"] += 1
                             else:
                                 new_sd[k] = v
                                 counts["kept"] += 1
@@ -2138,7 +2292,7 @@ class StarUltimateModelConverter:
 
                             qdata, params = TensorCoreConvRotW4A4Layout.quantize(
                                 v_tensor_ready,
-                                convrot_groupsize=CONVROT_GROUPSIZE,
+                                convrot_groupsize=_required_convrot_gs(v_tensor_ready.shape[1]),
                                 quant_group_size=INT4_QUANT_GROUPSIZE,
                             )
 
@@ -2148,7 +2302,7 @@ class StarUltimateModelConverter:
 
                             quant_map["layers"][base_k_meta] = {
                                 "format": "convrot_w4a4",
-                                "convrot_groupsize": CONVROT_GROUPSIZE,
+                                "convrot_groupsize": _required_convrot_gs(v_tensor_ready.shape[1]),
                                 "quant_group_size": INT4_QUANT_GROUPSIZE,
                             }
 
@@ -2162,7 +2316,7 @@ class StarUltimateModelConverter:
 
                             if v.dtype.is_floating_point:
                                 new_sd[k] = v.to(dtype=torch.bfloat16)
-                                counts["kept bf16"] += 1
+                                counts["FAILED bf16"] += 1
                             else:
                                 new_sd[k] = v
                                 counts["kept"] += 1
@@ -2199,16 +2353,15 @@ class StarUltimateModelConverter:
                                 qdata, params = TensorWiseINT8Layout.quantize(
                                     v_tensor_ready,
                                     per_channel=True,
-                                    convrot=True,
-                                    convrot_groupsize=CONVROT_GROUPSIZE,
+                                    convrot=_convrot_gs is not None,
+                                    convrot_groupsize=_convrot_gs or CONVROT_GROUPSIZE,
                                 )
                                 tensors = TensorWiseINT8Layout.state_dict_tensors(qdata, params)
                                 store_quantized_weight(new_sd, k, tensors)
-                                override_conf = {
-                                    "format": "int8_tensorwise",
-                                    "convrot": True,
-                                    "convrot_groupsize": CONVROT_GROUPSIZE,
-                                }
+                                override_conf = {"format": "int8_tensorwise"}
+                                if _convrot_gs is not None:
+                                    override_conf["convrot"] = True
+                                    override_conf["convrot_groupsize"] = _convrot_gs
                                 if is_w8a16:
                                     as_w8a16_conf(override_conf)
                                 quant_map["layers"][base_k_meta] = override_conf
@@ -2223,7 +2376,7 @@ class StarUltimateModelConverter:
 
                             if v.dtype.is_floating_point:
                                 new_sd[k] = v.to(dtype=torch.bfloat16)
-                                counts["kept bf16"] += 1
+                                counts["FAILED bf16"] += 1
                             else:
                                 new_sd[k] = v
                                 counts["kept"] += 1
@@ -2262,7 +2415,7 @@ class StarUltimateModelConverter:
 
                             if v.dtype.is_floating_point:
                                 new_sd[k] = v.to(dtype=torch.bfloat16)
-                                counts["kept bf16"] += 1
+                                counts["FAILED bf16"] += 1
                             else:
                                 new_sd[k] = v
                                 counts["kept"] += 1
@@ -2312,11 +2465,12 @@ class StarUltimateModelConverter:
                         try:
                             v_tensor_ready = v_tensor.float().contiguous()
                             layout = TensorCoreConvRotW4A4Layout
+                            _gs4 = _required_convrot_gs(v_tensor_ready.shape[1])
 
                             split = svdquant_split(
                                 v_tensor_ready,
                                 svdquant_rank,
-                                CONVROT_GROUPSIZE,
+                                _gs4,
                                 svdquant_refine_iters,
                             )
 
@@ -2326,7 +2480,7 @@ class StarUltimateModelConverter:
                                     f"quantizing as plain W4A4 (no low-rank branch)"
                                 )
                                 qdata, params = layout.quantize(
-                                    v_tensor_ready, convrot_groupsize=CONVROT_GROUPSIZE,
+                                    v_tensor_ready, convrot_groupsize=_gs4,
                                 )
                                 l1 = l2 = None
                             else:
@@ -2338,7 +2492,7 @@ class StarUltimateModelConverter:
 
                             layer_conf = {
                                 "format": "convrot_w4a4",
-                                "convrot_groupsize": CONVROT_GROUPSIZE,
+                                "convrot_groupsize": _gs4,
                             }
                             if l1 is not None:
                                 layer_conf["svdquant"] = True
@@ -2356,8 +2510,9 @@ class StarUltimateModelConverter:
                             print(f"⚠️ SVDQuant failed for {k}, falling back to plain W4A4: {e}")
                             try:
                                 v_tensor_ready = v_tensor.float().contiguous()
+                                _gs4 = _required_convrot_gs(v_tensor_ready.shape[1])
                                 qdata, params = TensorCoreConvRotW4A4Layout.quantize(
-                                    v_tensor_ready, convrot_groupsize=CONVROT_GROUPSIZE,
+                                    v_tensor_ready, convrot_groupsize=_gs4,
                                 )
                                 store_quantized_weight(
                                     new_sd, k,
@@ -2365,14 +2520,14 @@ class StarUltimateModelConverter:
                                 )
                                 quant_map["layers"][base_k_meta] = {
                                     "format": "convrot_w4a4",
-                                    "convrot_groupsize": CONVROT_GROUPSIZE,
+                                    "convrot_groupsize": _gs4,
                                 }
                                 counts["svdquant_w4a4_fallback_w4a4"] += 1
                             except Exception as e2:
                                 print(f"⚠️ Plain W4A4 fallback also failed for {k}: {e2}")
                                 if v.dtype.is_floating_point:
                                     new_sd[k] = v.to(dtype=torch.bfloat16)
-                                    counts["kept bf16"] += 1
+                                    counts["FAILED bf16"] += 1
                                 else:
                                     new_sd[k] = v
                                     counts["kept"] += 1
@@ -2404,18 +2559,18 @@ class StarUltimateModelConverter:
                                 qdata, params = TensorWiseINT8Layout.quantize(
                                     v_tensor_ready,
                                     per_channel=True,
-                                    convrot=True,
-                                    convrot_groupsize=CONVROT_GROUPSIZE,
+                                    convrot=_convrot_gs is not None,
+                                    convrot_groupsize=_convrot_gs or CONVROT_GROUPSIZE,
                                 )
 
                                 tensors = TensorWiseINT8Layout.state_dict_tensors(qdata, params)
                                 store_quantized_weight(new_sd, k, tensors)
 
-                                quant_map["layers"][base_k_meta] = {
-                                    "format": "int8_tensorwise",
-                                    "convrot": True,
-                                    "convrot_groupsize": CONVROT_GROUPSIZE,
-                                }
+                                native_conf = {"format": "int8_tensorwise"}
+                                if _convrot_gs is not None:
+                                    native_conf["convrot"] = True
+                                    native_conf["convrot_groupsize"] = _convrot_gs
+                                quant_map["layers"][base_k_meta] = native_conf
 
                                 counts["native_mix_qkv_int8convrot"] += 1
 
@@ -2425,7 +2580,7 @@ class StarUltimateModelConverter:
                             except Exception as e:
                                 print(f"⚠️ NATIVE_MIX qkv_proj failed for {k}: {e}")
                                 new_sd[k] = v.to(dtype=torch.bfloat16)
-                                counts["kept bf16"] += 1
+                                counts["FAILED bf16"] += 1
 
                                 if device == "cuda":
                                     del v_tensor
@@ -2460,7 +2615,7 @@ class StarUltimateModelConverter:
                             except Exception as e:
                                 print(f"⚠️ NATIVE_MIX mlp failed for {k}: {e}")
                                 new_sd[k] = v.to(dtype=torch.bfloat16)
-                                counts["kept bf16"] += 1
+                                counts["FAILED bf16"] += 1
 
                                 if device == "cuda":
                                     del v_tensor
@@ -2657,15 +2812,16 @@ class StarUltimateModelConverter:
                             try:
                                 v_tensor_ready = v_tensor.float().contiguous()
                                 qdata, params = TensorWiseINT8Layout.quantize(
-                                    v_tensor_ready, per_channel=True, convrot=True,
-                                    convrot_groupsize=CONVROT_GROUPSIZE,
+                                    v_tensor_ready, per_channel=True,
+                                    convrot=_convrot_gs is not None,
+                                    convrot_groupsize=_convrot_gs or CONVROT_GROUPSIZE,
                                 )
                                 tensors = TensorWiseINT8Layout.state_dict_tensors(qdata, params)
                                 store_quantized_weight(new_sd, k, tensors)
-                                naive_conf = {
-                                    "format": "int8_tensorwise", "convrot": True,
-                                    "convrot_groupsize": CONVROT_GROUPSIZE,
-                                }
+                                naive_conf = {"format": "int8_tensorwise"}
+                                if _convrot_gs is not None:
+                                    naive_conf["convrot"] = True
+                                    naive_conf["convrot_groupsize"] = _convrot_gs
                                 if is_w8a16:
                                     as_w8a16_conf(naive_conf)
                                 quant_map["layers"][base_k_meta] = naive_conf
@@ -2674,7 +2830,7 @@ class StarUltimateModelConverter:
                                 print(f"⚠️ Naive fallback also failed for {k}: {e2}")
                                 if v.dtype.is_floating_point:
                                     new_sd[k] = v.to(dtype=torch.bfloat16)
-                                    counts["kept bf16"] += 1
+                                    counts["FAILED bf16"] += 1
                                 else:
                                     new_sd[k] = v
                                     counts["kept"] += 1
@@ -2713,20 +2869,26 @@ class StarUltimateModelConverter:
                             and active_awq_prescale
                             and any(name in k for name in active_awq_prescale)
                         ):
-                            pre_quant_scale = compute_awq_prescale(v_tensor_ready)
-                            v_tensor_ready = v_tensor_ready * pre_quant_scale.unsqueeze(0)
+                            # AWQ smoothing: W' = W diag(s), with s boosting the
+                            # low-magnitude input channels. ComfyUI's nvfp4 forward
+                            # multiplies the input by the stored pre_quant_scale, so it
+                            # must hold 1/s -- storing s applies the scale twice in the
+                            # same direction (off by s^2 at inference).
+                            _s = compute_awq_prescale(v_tensor_ready)
+                            pre_quant_scale = (1.0 / _s).to(torch.float32)
+                            v_tensor_ready = v_tensor_ready * _s.unsqueeze(0)
 
                         if int8_convrot:
                             qdata, params = layout.quantize(
                                 v_tensor_ready,
                                 per_channel=True,
-                                convrot=True,
-                                convrot_groupsize=CONVROT_GROUPSIZE,
+                                convrot=_convrot_gs is not None,
+                                convrot_groupsize=_convrot_gs or CONVROT_GROUPSIZE,
                             )
                         elif int4_convrot:
                             qdata, params = layout.quantize(
                                 v_tensor_ready,
-                                convrot_groupsize=CONVROT_GROUPSIZE,
+                                convrot_groupsize=_required_convrot_gs(v_tensor_ready.shape[1]),
                                 quant_group_size=INT4_QUANT_GROUPSIZE,
                             )
                         elif target_format == "mxfp8" and mxfp8_backend is not None:
@@ -2742,15 +2904,18 @@ class StarUltimateModelConverter:
                         store_quantized_weight(new_sd, k, tensors)
 
                         if pre_quant_scale is not None:
-                            new_sd[f"{base_k_file}.pre_quant_scale"] = pre_quant_scale.to(torch.bfloat16).cpu()
+                            # F32: bf16 has an 8-bit mantissa, so s and 1/s would no
+                            # longer cancel and the smoothing adds a systematic error.
+                            new_sd[f"{base_k_file}.pre_quant_scale"] = pre_quant_scale.to(torch.float32).cpu()
 
                         layer_conf = {"format": fmt_name}
 
                         if int8_convrot:
-                            layer_conf["convrot"] = True
-                            layer_conf["convrot_groupsize"] = CONVROT_GROUPSIZE
+                            if _convrot_gs is not None:
+                                layer_conf["convrot"] = True
+                                layer_conf["convrot_groupsize"] = _convrot_gs
                         elif int4_convrot:
-                            layer_conf["convrot_groupsize"] = CONVROT_GROUPSIZE
+                            layer_conf["convrot_groupsize"] = _required_convrot_gs(v_tensor_ready.shape[1])
                             layer_conf["quant_group_size"] = INT4_QUANT_GROUPSIZE
 
                         if pre_quant_scale is not None:
@@ -2767,7 +2932,7 @@ class StarUltimateModelConverter:
 
                         if v.dtype.is_floating_point:
                             new_sd[k] = v.to(dtype=torch.bfloat16)
-                            counts["kept bf16"] += 1
+                            counts["FAILED bf16"] += 1
                         else:
                             new_sd[k] = v
                             counts["kept"] += 1
@@ -2783,6 +2948,13 @@ class StarUltimateModelConverter:
                         new_sd[k] = v
                         counts["kept"] += 1
 
+        failed_total = sum(n for name, n in counts.items() if "failed" in name.lower())
+        if strict and failed_total:
+            raise RuntimeError(
+                f"strict=True: {failed_total} layer(s) failed to quantize to {target_format} "
+                f"and were kept in full precision. Counts: {dict(counts)}"
+            )
+
         if (is_w4a8 or is_w3a8 or is_w5a8 or is_w6a8) and any(
             conf.get("format") == "nvfp4" for conf in quant_map["layers"].values()
         ):
@@ -2790,6 +2962,11 @@ class StarUltimateModelConverter:
                 f"{target_format} selected but NVFP4 layers were produced -- layers escaped "
                 "the WxAy block into the generic fallback. Aborting instead of writing a "
                 "broken file. Check the target_format string and the WxAy block above."
+            )
+        if not new_sd:
+            raise RuntimeError(
+                "Refusing to write an empty model: no tensor survived the conversion "
+                "(wrong input format for the selected mode?)."
             )
         new_sd = {k: v for k, v in new_sd.items() if not k.endswith(".comfy_quant")}
 
@@ -2800,10 +2977,11 @@ class StarUltimateModelConverter:
         # per-module tensors and treat the header as legacy.
         #
         # Key convention: comfy_quant sits next to its weight using the
-        # same prefix the weight tensors use (base_k_file). ComfyUI
-        # strips the AIO 'model.diffusion_model.' prefix from all tensor
-        # keys on load, so both the weight and its comfy_quant end up
-        # under the model's internal module path.
+        # SAME key path as the weight tensors (base_k_file, which keeps the
+        # AIO 'model.diffusion_model.' prefix). ComfyUI's load_model_weights()
+        # only copies keys that start with the detected prefix and strips it
+        # while copying, so an unprefixed record would be dropped and the int8
+        # payload loaded as raw bf16.
         for _layer_path, _layer_conf in quant_map["layers"].items():
             _cq_key = f"{_layer_path}.comfy_quant"
             if _cq_key not in new_sd:
@@ -2827,6 +3005,7 @@ class StarUltimateModelConverter:
             final_metadata[k] = v
 
         print(f"💾 Saving | Type: {model_type} | Path: {output_path}")
+        _dedupe_save_tensors(new_sd)
         safetensors.torch.save_file(new_sd, output_path, metadata=final_metadata)
 
         output_bytes = os.path.getsize(output_path)
@@ -2846,9 +3025,14 @@ class StarUltimateModelConverter:
 
         layers_desc = ", ".join(f"{n} {name}" for name, n in counts.most_common())
 
+        headline = (
+            f"⚠️ Completed with {failed_total} layer failure(s) ({model_type} → {target_format})"
+            if failed_total else f"✅ Success ({model_type} → {target_format})"
+        )
+
         status = "\n".join(
             [
-                f"✅ Success ({model_type} → {target_format})",
+                headline,
                 f"Input: {input_desc}",
                 f"Original format: {input_format}",
                 f"Original size: {format_size(input_bytes)}",
@@ -2899,6 +3083,7 @@ class StarUltimateModelConverter:
             return counts
 
         if not is_kquant:
+            os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
             counts = write_gguf(output_path, gguf_quant_type)
         else:
             llama_bin = find_llama_quantize_binary(llama_quantize_bin or None)
@@ -2918,7 +3103,10 @@ class StarUltimateModelConverter:
                 print(f"* Stage 2/2: llama-quantize --pure {cli_type} -> {output_path}")
 
                 command = [llama_bin, "--pure", intermediate_path, output_path, cli_type]
-                result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                result = subprocess.run(
+                    command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, timeout=KQUANT_TIMEOUT_SECONDS,
+                )
 
                 if result.stdout:
                     for line in result.stdout.splitlines():

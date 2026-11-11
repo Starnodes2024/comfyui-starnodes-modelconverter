@@ -361,6 +361,51 @@ MIT — see [LICENSE](LICENSE). Respect the licenses of the models you convert.
 ## Changelog
 
 ### Unreleased
+
+**Correctness fixes (2026-11-11)** — audited against the code and measured on CPU; every item
+below was reproduced before patching.
+
+- **ConvRot group size is now resolved per layer** (256 → 64 → no rotation) instead of being
+  hardcoded to 256. A layer whose `in_features` was divisible by 64 but not 256 made the layout
+  raise, which silently left the whole layer in bf16. Affects `int8_convrot`, `w8a16_convrot`,
+  `int4_convrot`, `w4a4`, `svdquant_w4a4` and the Minimax-H3 native-mix qkv path; the metadata
+  records the group size actually used.
+- **`learned_round_refine()` no longer rounds to integers on a float grid.** For `fp8` targets the
+  integer round discarded e4m3 mantissa bits and made learned rounding *worse* than plain
+  round-to-nearest (+3.3% weight error, 23% of weights changed); now +0.6% and identical to plain
+  rounding at low iteration counts. Also snapshots `best_delta` before the optimizer step, clamps
+  before the first cast, and clamps int8 to ±127 (matching the `amax/127` scale convention).
+- **Weight keys are matched with `.endswith(".weight")`**, not `".weight" in k`, and the base name
+  is a slice. Stray companion tensors (`foo.weight_scale`, 2-D) are no longer quantized as weights,
+  keys with `.weight` twice are no longer mangled, and leftover scale/companion tensors
+  (`*.weight_scale`, `*.pre_quant_scale`, `*.svdq_l1/l2`, …) are dropped with a log line.
+- **Failures are reported.** Every per-layer fallback now counts as `FAILED bf16`, and the status
+  line reads `⚠️ Completed with N layer failure(s)` instead of `✅ Success`. New optional
+  `strict` widget aborts the conversion when any layer failed.
+- **`Checkpoint` mode refuses a non-AIO file** instead of writing a header-only model, and the
+  empty-output guard covers every mode. The branch now uses the same hardened loader as the other
+  modes (pickle fallback for `.pt/.pth/.ckpt`, non-tensor filtering, nested `state_dict`/`module`
+  unwrapping, case-insensitive extension check).
+- **AIO files keep the `model.diffusion_model.` prefix on `comfy_quant` records and on the
+  `_quantization_metadata` layer names.** ComfyUI's `load_model_weights()` copies only keys that
+  start with that prefix and strips it while copying, so unprefixed records were dropped and int8
+  layers loaded as raw bf16. `block_index_from_key()` also strips the prefix, so the Minimax-H3
+  boundary blocks are protected in AIO mode.
+- **AWQ prescale stores `1/s` in F32.** ComfyUI multiplies the input by `pre_quant_scale` before
+  the GEMM; storing `s` applied the smoothing twice (`s²` error at inference).
+- **GGUF:** blacklisted/untouched tensors keep their source precision (F32 stays F32 instead of
+  becoming F16), a non-K-quant output directory is created, and `llama-quantize` runs with a
+  3600 s timeout instead of hanging the worker forever.
+- **`fp16` / `fp32` targets honour `keep_fp32` / `keep_fp16`** instead of casting everything.
+- **Hardening:** `realpath` in the custom-path guard, shared-storage/non-contiguous tensors are
+  cloned before saving (tied weights no longer abort `save_file`), suffix-collision detection in
+  the W4A8/AWQ tensor mappers, ROCm `float8_*fnuz` dtypes dequantized, empty `diffusion_models`
+  folder list handled, `PRECISION_RE` matches a bare `fp8`/`fp8_scaled` and
+  `minimax_h3_native_mix`.
+- Left alone on purpose: outputs still land next to their input (no `converted/` subfolder), the
+  custom-path root still includes the whole ComfyUI tree, and the W3A8/W5A8/W6A8 ConvRot group
+  size stays fixed at 256.
+
 - 🆕 **W3A8 / W5A8 ConvRot** — `w3a8_convrot`, `w3a8_convrot_pruned`, `w5a8_convrot`,
   `w5a8_convrot_pruned`: the same `AsymW4A8Int8Layout` at `bits=3` and `bits=5`
   ([comfy-kitchen#303](https://github.com/Comfy-Org/comfy-kitchen/pull/303)). 3-bit stores `3K/8`
