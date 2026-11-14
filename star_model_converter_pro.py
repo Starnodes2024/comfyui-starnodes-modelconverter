@@ -319,6 +319,30 @@ class StarUltimateModelConverterPro:
         if not base_name.endswith(".safetensors"):
             base_name += ".safetensors"
         
+        # A layer that arrived already quantized passes through untouched (its
+        # weight is not floating point), so the requested target format only
+        # ever applies to the layers converted here. Record that rather than
+        # letting the output header imply the whole file was converted.
+        prequantized = {}
+        for _k, _t in model_sd.items():
+            if not _k.endswith(".comfy_quant"):
+                continue
+            _base = _k[:-len(".comfy_quant")]
+            if _base in quant_map["layers"]:
+                continue                       # we re-quantized this one
+            try:
+                _fmt = json.loads(bytes(_t.tolist()).decode("utf-8")).get("format")
+            except Exception:
+                continue
+            if _fmt:
+                prequantized[_base] = _fmt
+        if prequantized:
+            print(f"⚠️ {len(prequantized)} layer(s) were already quantized and were "
+                  f"passed through unchanged - target {target_quant_format} applies "
+                  f"to the unquantized layers only.")
+            for _b, _f in list(prequantized.items())[:3]:
+                print(f"   e.g. {_b} = {_f}")
+
         # Prepare metadata
         # Layers that were already quantized pass through untouched (they are
         # not floating point), so keep the input's record for them. Anything
@@ -345,6 +369,10 @@ class StarUltimateModelConverterPro:
         final_metadata["profile_used"] = profile
         final_metadata["model_type"] = model_type
         final_metadata["target_format"] = target_quant_format
+        if prequantized:
+            # target_format describes what this run applied to the layers it
+            # converted; this many layers kept their own pre-existing format
+            final_metadata["prequantized_layers"] = str(len(prequantized))
         
         # Save converted model
         output_dir = folder_paths.get_folder_paths("diffusion_models")[0]
