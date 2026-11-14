@@ -7,6 +7,36 @@ import safetensors.torch
 def format_size(num_bytes):
     return f"{num_bytes / (1024**3):.2f} GB"
 
+
+def safe_output_path(base_dir, name):
+    """Join a user-supplied output name under base_dir, refusing traversal.
+
+    output_name is a free-text widget: '../..' or an absolute/drive path would
+    otherwise write (and overwrite) any .safetensors the process can reach.
+    Subfolders stay allowed, like ComfyUI's own save nodes.
+    """
+    raw = str(name or "").strip().replace("\\", "/")
+    parts = [p for p in raw.split("/") if p not in ("", ".")]
+    if (any(p == ".." for p in parts) or not parts
+            or os.path.isabs(raw) or (len(raw) > 1 and raw[1] == ":")):
+        raise ValueError(
+            "Star Nodes: output name must stay inside the ComfyUI models folder "
+            f"(got {name!r}).")
+    root = os.path.abspath(base_dir)
+    out = os.path.abspath(os.path.join(root, "/".join(parts)))
+    try:
+        inside = os.path.commonpath([root, out]) == root
+    except ValueError:                       # different drive (Windows)
+        inside = False
+    if not inside:
+        raise ValueError(
+            "Star Nodes: output name must stay inside the ComfyUI models folder "
+            f"(got {name!r}).")
+    sub = os.path.dirname(out)
+    if sub:
+        os.makedirs(sub, exist_ok=True)
+    return out
+
 class StarnodesAIOSaver:
     @classmethod
     def INPUT_TYPES(s):
@@ -57,7 +87,7 @@ class StarnodesAIOSaver:
         start_time = time.time()
 
         ckpt_dir = folder_paths.get_folder_paths("checkpoints")[0]
-        out_path = os.path.join(ckpt_dir, f"{output_name}.safetensors")
+        out_path = safe_output_path(ckpt_dir, f"{output_name}.safetensors")
 
         components = [
             ("Model", model_name, "diffusion_models", model_prefix),

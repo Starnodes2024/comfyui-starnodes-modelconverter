@@ -58,15 +58,32 @@ function createTooltip(metadata, event) {
         border: 1px solid rgba(255, 255, 255, 0.1);
     `;
     
-    const lines = [
-        `<div style="font-weight: bold; margin-bottom: 8px; color: #4CAF50;">📋 Profile Information</div>`,
-        `<div><strong>Model:</strong> ${metadata.original_model_name || 'Unknown'}</div>`,
-        `<div><strong>Created:</strong> ${formatDate(metadata.timestamp)}</div>`,
-        `<div><strong>Layers:</strong> ${metadata.total_layers || 'Unknown'}</div>`,
-        `<div style="margin-top: 8px; font-size: 10px; color: #888;">Created by: ${metadata.created_by || 'Unknown'}</div>`
+    const header = document.createElement("div");
+    header.textContent = "📋 Profile Information";
+    header.style.cssText = "font-weight: bold; margin-bottom: 8px; color: #4CAF50;";
+    tooltip.appendChild(header);
+
+    // textContent, not innerHTML: these values come from the profile JSON
+    // (original model filename, author string), so markup in a shared profile
+    // would otherwise execute in the ComfyUI origin.
+    const rows = [
+        ["Model", metadata.original_model_name || "Unknown"],
+        ["Created", formatDate(metadata.timestamp)],
+        ["Layers", metadata.total_layers || "Unknown"],
     ];
-    
-    tooltip.innerHTML = lines.join('');
+    for (const [label, value] of rows) {
+        const row = document.createElement("div");
+        const strong = document.createElement("strong");
+        strong.textContent = `${label}:`;
+        row.appendChild(strong);
+        row.appendChild(document.createTextNode(` ${value}`));
+        tooltip.appendChild(row);
+    }
+
+    const byline = document.createElement("div");
+    byline.textContent = `Created by: ${metadata.created_by || "Unknown"}`;
+    byline.style.cssText = "margin-top: 8px; font-size: 10px; color: #888;";
+    tooltip.appendChild(byline);
     document.body.appendChild(tooltip);
     
     // Position direkt beim Erstellen setzen
