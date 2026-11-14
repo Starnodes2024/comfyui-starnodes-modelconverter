@@ -62,6 +62,38 @@ def is_norm_or_embedding(layer_name):
     return any(pattern in layer_lower for pattern in NORM_PATTERNS + EMBEDDING_PATTERNS)
 
 
+def safe_output_path(base_dir, name, extension=""):
+    """Join a user-supplied output name under base_dir, refusing traversal.
+
+    The output-name widget is free text, so '../..' or an absolute/drive path
+    would write (and silently overwrite) anywhere the process can reach.
+    Subfolders stay allowed, like ComfyUI's own save nodes.
+    """
+    raw = str(name or "").strip().replace("\\", "/")
+    parts = [p for p in raw.split("/") if p not in ("", ".")]
+    if (any(p == ".." for p in parts) or not parts
+            or os.path.isabs(raw) or (len(raw) > 1 and raw[1] == ":")):
+        raise ValueError(
+            "Star Nodes: output name must stay inside the ComfyUI models folder "
+            f"(got {name!r}).")
+    root = os.path.abspath(base_dir)
+    out = os.path.abspath(os.path.join(root, "/".join(parts)))
+    try:
+        inside = os.path.commonpath([root, out]) == root
+    except ValueError:                       # different drive (Windows)
+        inside = False
+    if not inside:
+        raise ValueError(
+            "Star Nodes: output name must stay inside the ComfyUI models folder "
+            f"(got {name!r}).")
+    if extension and not out.lower().endswith(extension.lower()):
+        out += extension
+    sub = os.path.dirname(out)
+    if sub:
+        os.makedirs(sub, exist_ok=True)
+    return out
+
+
 def load_model_configs():
     """Load model configurations from models.json."""
     with open(MODELS_JSON, "r", encoding="utf-8") as f:
@@ -287,7 +319,7 @@ class StarUltimateModelConverterPro:
         
         # Save converted model
         output_dir = folder_paths.get_folder_paths("diffusion_models")[0]
-        output_path = os.path.join(output_dir, base_name)
+        output_path = safe_output_path(output_dir, base_name)
         
         print(f"💾 Saving converted model to: {output_path}")
         safetensors.torch.save_file(new_sd, output_path, metadata=final_metadata)
@@ -345,7 +377,12 @@ class StarUltimateModelConverterPro:
         # Normalize profile format (remove extra info like "+ SCALE", "_SCALE", etc.)
         if profile_format:
             # Extract base format from strings like "FP8_E4M3FN + SCALE" or "TORCH.UINT8 + SCALE"
-            profile_format_clean = profile_format.split("+")[0].split("_SCALE")[0].strip()
+            profile_format_clean = profile_format.split("+")[0].split("_SCALE")[0]
+            # Star Model Layers Info appends annotations - "INT8_CONVROT
+            # (GS:256)", "NVFP4 (GS:16)", "INT8 [W8A16]" - which never matched
+            # the exact-string rule lists below, so those layers fell through
+            # to kept_default and were silently not quantized.
+            profile_format_clean = profile_format_clean.split("(")[0].split("[")[0].strip()
             # Handle special cases
             if "TORCH.UINT8" in profile_format_clean or "UINT8" in profile_format_clean:
                 profile_format_clean = "INT4_CONVROT"  # Treat as deep quantization
@@ -433,6 +470,16 @@ class StarUltimateModelConverterPro:
                     return tensor.contiguous()
             
             # Normal mode: convert to 8-bit
+            if profile_format_clean == "INT8":
+                # INT8 needs a scale. A bare float->int8 cast truncates toward
+                # zero (0.05 -> 0), which zeroed every ordinary weight. Route
+                # 2-D weights through the shared quantizer; anything else
+                # (bias, norm) stays bf16 rather than becoming zeros.
+                if tensor.ndim == 2 and ".weight" in key:
+                    return self._apply_deep_quantization(
+                        key, tensor, "INT8", device, stats, quant_map)
+                stats["kept_bf16_int8_nonweight"] += 1
+                return tensor.to(torch.bfloat16).contiguous()
             target_dtype = DTYPE_MAP.get(profile_format_clean, torch.float8_e4m3fn)
             if tensor.dtype in [torch.float32, torch.float16, torch.bfloat16]:
                 stats[f"to_{profile_format_clean.lower()}"] += 1

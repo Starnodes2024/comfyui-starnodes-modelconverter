@@ -133,8 +133,11 @@ TARGET_FORMATS = [
 W8A16_TARGET_FORMATS = ("w8a16", "w8a16_convrot", "w8a16_convrot_pruned")
 
 GGUF_LEGACY_QUANT_MAP = {
-    "gguf_f16": None,
-    "gguf_bf16": None,
+    # None means "no override": the writer then keeps each tensor's source
+    # dtype, so gguf_f16 and gguf_bf16 produced identical files and neither
+    # converted to the precision in its name.
+    "gguf_f16": "F16",
+    "gguf_bf16": "BF16",
     "gguf_q8_0": "Q8_0",
     "gguf_q5_1": "Q5_1",
     "gguf_q5_0": "Q5_0",
