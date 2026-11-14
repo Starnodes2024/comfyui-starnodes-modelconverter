@@ -265,6 +265,17 @@ class StarUltimateModelConverterPro:
         
         print(f"📦 Loading model: {model_name}")
         model_sd = safetensors.torch.load_file(model_path)
+
+        # load_file() returns tensors only, and an already-quantized tensor
+        # (int8 qdata + its scale) passes straight through the rule engine
+        # without ever earning a quant_map entry - so the input's own
+        # quantization record has to be read here or it is lost.
+        input_metadata = {}
+        try:
+            with safetensors.safe_open(model_path, framework="pt") as _f:
+                input_metadata = _f.metadata() or {}
+        except Exception as e:
+            print(f"⚠️ Could not read the input header: {e}")
         
         # Convert model based on profile
         new_sd = OrderedDict()
@@ -309,6 +320,24 @@ class StarUltimateModelConverterPro:
             base_name += ".safetensors"
         
         # Prepare metadata
+        # Layers that were already quantized pass through untouched (they are
+        # not floating point), so keep the input's record for them. Anything
+        # this run quantized itself overrides the inherited entry.
+        inherited = {}
+        if input_metadata.get("_quantization_metadata"):
+            try:
+                inherited = json.loads(
+                    input_metadata["_quantization_metadata"]).get("layers", {}) or {}
+            except (ValueError, AttributeError) as e:
+                print(f"⚠️ Input _quantization_metadata is unreadable, ignoring: {e}")
+        if inherited:
+            merged = dict(inherited)
+            merged.update(quant_map["layers"])
+            quant_map = {"format_version": quant_map.get("format_version", "1.0"),
+                         "layers": merged}
+            print(f"♻️ Carried over {len(inherited)} quantized layer record(s) "
+                  f"from the input header")
+
         final_metadata = OrderedDict()
         if quant_map["layers"]:
             final_metadata["_quantization_metadata"] = json.dumps(quant_map)
