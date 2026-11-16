@@ -469,27 +469,6 @@ def diffusion_models_dir():
     return paths[0]
 
 
-def load_aio_model(checkpoint_name):
-    ckpt_path = folder_paths.get_full_path("checkpoints", checkpoint_name)
-    if not ckpt_path:
-        raise ValueError(f"Checkpoint not found: {checkpoint_name}")
-
-    full_sd = comfy.utils.load_torch_file(ckpt_path, safe_load=True)
-    sd = {
-        k[len(AIO_MODEL_PREFIX):]: v
-        for k, v in full_sd.items()
-        if k.startswith(AIO_MODEL_PREFIX)
-    }
-
-    if not sd:
-        raise ValueError(
-            f"No '{AIO_MODEL_PREFIX}' keys found in {os.path.basename(ckpt_path)}. "
-            "Is this an all-in-one checkpoint?"
-        )
-
-    return sd, ckpt_path
-
-
 def pick_nvfp4_backend(device):
     """Probe NVFP4 quantization once and pick a backend that actually works.
 
@@ -749,7 +728,11 @@ def learned_round_refine(
             except Exception:
                 # Degenerate (all-zero / non-finite) tensor: no SVD subspace to
                 # project onto, so just return the naive quantization untouched.
-                return _to_grid(weight_f32 * scale)
+                # Cast to the storage dtype: _to_grid stays float32 so the SVD math
+                # below runs in fp32, but callers store the return value verbatim and
+                # write int8 / float8 metadata for it -- a float32 payload there makes
+                # the file contradict its own comfy_quant record.
+                return _to_grid(weight_f32 * scale).to(target_dtype)
 
             w_rounded = _to_grid(weight_f32 * scale)
 
@@ -781,7 +764,7 @@ def learned_round_refine(
         # whose delta points toward zero by a full LSB (measured on Qwen3.5-9B:
         # ~49% of all weights moved one LSB, +155% relative weight error versus
         # plain round-to-nearest).
-        return _to_grid(w_rounded + best_delta)
+        return _to_grid(w_rounded + best_delta).to(target_dtype)
 
 
 def compute_awq_prescale(weight: torch.Tensor, alpha: float = AWQ_PRESCALE_ALPHA) -> torch.Tensor:
@@ -882,6 +865,29 @@ def build_output_path(out_dir, base_name, target_format):
     return os.path.join(out_dir, f"{stem}-{target_format.strip()}.safetensors")
 
 
+def refuse_overwriting_input(output_path, input_files):
+    """Refuse a conversion whose output path is one of its own inputs.
+
+    build_output_path() strips the precision suffix and re-appends the target
+    format, so converting "flux1-dev-fp8.safetensors" to fp8 resolves to the
+    very file being read: save_file() then truncates the source before writing
+    the new bytes. There is no undo for that, so fail before touching it.
+    """
+    out = os.path.normcase(os.path.abspath(output_path))
+    for f in input_files:
+        try:
+            same = os.path.normcase(os.path.abspath(f)) == out
+        except OSError:
+            continue
+        if same:
+            raise ValueError(
+                f"Refusing to overwrite the input model: {output_path} is the file "
+                "being converted. The output name keeps the target suffix, so "
+                "converting an already-<format> file resolves to itself. Rename or "
+                "move the source, or convert from the higher-precision original."
+            )
+
+
 _SHARD_NAME_RE = re.compile(r"-\d{5}-of-\d{5}\.safetensors$")
 
 
@@ -900,6 +906,11 @@ def shard_index_keys(files):
     # (diffusion_pytorch_model.safetensors.index.json, ...).
     index_candidates = sorted(glob.glob(os.path.join(folder, "*.safetensors.index.json")))
     index_path = index_candidates[0] if index_candidates else None
+    if len(index_candidates) > 1:
+        _cand_names = ", ".join(os.path.basename(p) for p in index_candidates)
+        print(f"⚠️ {len(index_candidates)} *.safetensors.index.json beside these files "
+              f"({_cand_names}); using '{os.path.basename(index_path)}'. Point the "
+              "converter at one specific file if that is not the variant you meant.")
 
     if index_path is None:
         if len(files) > 1:
@@ -1045,10 +1056,13 @@ def _dedupe_save_tensors(new_sd):
             ptr = value.untyped_storage().data_ptr()
         except Exception:
             continue
+        # Two independent repairs: a tensor can share storage (clone it) *and* be
+        # non-contiguous (value.t() is both), and clone() keeps the strides, so the
+        # elif left exactly the tensors this helper exists for non-contiguous.
         if ptr in seen:
             new_sd[key] = value.clone()
             value = new_sd[key]
-        elif not value.is_contiguous():
+        if not value.is_contiguous():
             new_sd[key] = value.contiguous()
             value = new_sd[key]
         seen.add(value.untyped_storage().data_ptr())
@@ -1160,12 +1174,19 @@ def store_awq_w4a16_quantized_weight(new_sd, original_weight_key, tensors):
         assign_quantized_tensor(new_sd, out_key, tensor)
 
 
-def quantize_w4a8_convrot(weight_f32: torch.Tensor):
+def quantize_w4a8_convrot(weight_f32: torch.Tensor, convrot_groupsize=None):
     if not W4A8_AVAILABLE:
         raise RuntimeError(
             "W4A8 ConvRot requires comfy-kitchen AsymW4A8Int8Layout. "
             "Update comfy-kitchen to a build that contains it."
         )
+
+    # 256 -> 64 -> raise, the same fallback the int8 convrot paths use. A 1088-wide
+    # layer has no 256 group but does have 17 groups of 64, and the layout rejects
+    # convrot_groupsize=256 for it ("K=1088 must be divisible by ..."), which used to
+    # send every such layer to bf16 even though W4A8 can hold it at GS=64.
+    if convrot_groupsize is None:
+        convrot_groupsize = _required_convrot_gs(weight_f32.shape[-1])
 
     try:
         sig = inspect.signature(W4A8_LAYOUT.quantize)
@@ -1177,7 +1198,7 @@ def quantize_w4a8_convrot(weight_f32: torch.Tensor):
             kwargs["quant_group_size"] = W4A8_GROUP_SIZE
 
         if "convrot_groupsize" in sig.parameters:
-            kwargs["convrot_groupsize"] = W4A8_CONVROT_GROUPSIZE
+            kwargs["convrot_groupsize"] = convrot_groupsize
 
         if "convrot" in sig.parameters:
             kwargs["convrot"] = True
@@ -1190,11 +1211,15 @@ def quantize_w4a8_convrot(weight_f32: torch.Tensor):
 
         return W4A8_LAYOUT.quantize(weight_f32, **kwargs)
 
-    except TypeError:
+    except TypeError as exc:
+        # Only a signature mismatch should reach the retry: a TypeError raised
+        # inside quantize used to be rewritten as "unexpected keyword argument".
+        if "unexpected keyword argument" not in str(exc):
+            raise
         return W4A8_LAYOUT.quantize(
             weight_f32,
             group_size=W4A8_GROUP_SIZE,
-            convrot_groupsize=W4A8_CONVROT_GROUPSIZE,
+            convrot_groupsize=convrot_groupsize,
             symmetric=W4A8_SYMMETRIC,
             codebook=W4A8_CODEBOOK,
         )
@@ -1203,7 +1228,7 @@ def quantize_w4a8_convrot(weight_f32: torch.Tensor):
 _WXA8_BITS_SUPPORT_CACHE = {}
 
 
-def _probe_wxa8_bits(bits: int, codebook: bool) -> bool:
+def _probe_wxa8_bits(bits: int, codebook: bool, device="cpu") -> bool:
     """True when the installed comfy-kitchen can actually quantize at ``bits``.
 
     The ``bits`` kwarg has existed since W6A8 landed, so checking the signature
@@ -1212,7 +1237,7 @@ def _probe_wxa8_bits(bits: int, codebook: bool) -> bool:
     4 or 6". One tiny quantize per (bits, codebook) pair, cached, gives a single
     actionable error up front instead of one traceback per layer.
     """
-    cache_key = (bits, codebook)
+    cache_key = (bits, codebook, str(device))
     if cache_key in _WXA8_BITS_SUPPORT_CACHE:
         return _WXA8_BITS_SUPPORT_CACHE[cache_key]
 
@@ -1220,7 +1245,7 @@ def _probe_wxa8_bits(bits: int, codebook: bool) -> bool:
 
     if W4A8_AVAILABLE and "bits" in inspect.signature(W4A8_LAYOUT.quantize).parameters:
         try:
-            probe = torch.randn(16, 256, dtype=torch.float32)  # randn: all-zero input takes a degenerate amax=0 path
+            probe = torch.randn(16, 256, dtype=torch.float32, device=device)  # randn: all-zero input takes a degenerate amax=0 path
             W4A8_LAYOUT.quantize(
                 probe,
                 bits=bits,
@@ -1237,14 +1262,14 @@ def _probe_wxa8_bits(bits: int, codebook: bool) -> bool:
     return supported
 
 
-def _require_wxa8_bits(bits: int, codebook: bool, label: str, pr_hint: str):
+def _require_wxa8_bits(bits: int, codebook: bool, label: str, pr_hint: str, device="cpu"):
     if not W4A8_AVAILABLE:
         raise RuntimeError(
             f"{label} requires comfy-kitchen AsymW4A8Int8Layout (the class W4A8 uses). "
             "Update comfy-kitchen to a build that contains it."
         )
 
-    if not _probe_wxa8_bits(bits, codebook):
+    if not _probe_wxa8_bits(bits, codebook, device):
         raise RuntimeError(
             f"{label} requires a comfy-kitchen build with {bits}-bit AsymW4A8Int8Layout "
             f"support ({pr_hint}). The installed build only accepts bits=4 and bits=6 -- "
@@ -1269,7 +1294,7 @@ def _quantize_asym_wxa8_convrot(
     signature so an older build's missing/renamed parameter still fails through
     the TypeError fallback rather than a hard crash at import time.
     """
-    _require_wxa8_bits(bits, codebook, label, pr_hint)
+    _require_wxa8_bits(bits, codebook, label, pr_hint, getattr(weight_f32, "device", "cpu"))
 
     sig = inspect.signature(W4A8_LAYOUT.quantize)
     kwargs = {"bits": bits, "codebook": codebook}
@@ -1291,7 +1316,9 @@ def _quantize_asym_wxa8_convrot(
     try:
         return W4A8_LAYOUT.quantize(weight_f32, **kwargs)
 
-    except TypeError:
+    except TypeError as exc:
+        if "unexpected keyword argument" not in str(exc):
+            raise
         return W4A8_LAYOUT.quantize(
             weight_f32,
             bits=bits,
@@ -1302,7 +1329,7 @@ def _quantize_asym_wxa8_convrot(
         )
 
 
-def quantize_w6a8_convrot(weight_f32: torch.Tensor):
+def quantize_w6a8_convrot(weight_f32: torch.Tensor, convrot_groupsize=None):
     """
     W6A8: same comfy-kitchen AsymW4A8Int8Layout class as W4A8, with bits=6
     instead of the 4-bit default. Landed in comfy-kitchen#191 (merged
@@ -1313,18 +1340,20 @@ def quantize_w6a8_convrot(weight_f32: torch.Tensor):
     capability probe for that, raising a clear RuntimeError otherwise
     instead of silently falling back to 4-bit or misquantizing.
     """
+    if convrot_groupsize is None:
+        convrot_groupsize = _required_convrot_gs(weight_f32.shape[-1])
     return _quantize_asym_wxa8_convrot(
         weight_f32,
         bits=W6A8_BITS,
         group_size=W6A8_GROUP_SIZE,
-        convrot_groupsize=W6A8_CONVROT_GROUPSIZE,
+        convrot_groupsize=convrot_groupsize,
         codebook=False,
         label="W6A8",
         pr_hint="comfy-kitchen#191, merged commit e33c9bd",
     )
 
 
-def quantize_w3a8_convrot(weight_f32: torch.Tensor):
+def quantize_w3a8_convrot(weight_f32: torch.Tensor, convrot_groupsize=None):
     """
     W3A8: AsymW4A8Int8Layout at bits=3, from comfy-kitchen#303.
 
@@ -1337,18 +1366,20 @@ def quantize_w3a8_convrot(weight_f32: torch.Tensor):
     exists to make. Requires a comfy-kitchen build containing that PR; the
     probe raises instead of writing a file nothing can load.
     """
+    if convrot_groupsize is None:
+        convrot_groupsize = _required_convrot_gs(weight_f32.shape[-1])
     return _quantize_asym_wxa8_convrot(
         weight_f32,
         bits=W3A8_BITS,
         group_size=W3A8_GROUP_SIZE,
-        convrot_groupsize=W3A8_CONVROT_GROUPSIZE,
+        convrot_groupsize=convrot_groupsize,
         codebook=W3A8_CODEBOOK,
         label="W3A8",
         pr_hint="Comfy-Org/comfy-kitchen#303, 'Add w3 and w5 quantization formats'",
     )
 
 
-def quantize_w5a8_convrot(weight_f32: torch.Tensor):
+def quantize_w5a8_convrot(weight_f32: torch.Tensor, convrot_groupsize=None):
     """
     W5A8: AsymW4A8Int8Layout at bits=5, from comfy-kitchen#303.
 
@@ -1358,11 +1389,13 @@ def quantize_w5a8_convrot(weight_f32: torch.Tensor):
     over 6-bit when the extra 2.5% relative error is acceptable, and over 4-bit
     when the ~2x better error is worth the +25% bytes.
     """
+    if convrot_groupsize is None:
+        convrot_groupsize = _required_convrot_gs(weight_f32.shape[-1])
     return _quantize_asym_wxa8_convrot(
         weight_f32,
         bits=W5A8_BITS,
         group_size=W5A8_GROUP_SIZE,
-        convrot_groupsize=W5A8_CONVROT_GROUPSIZE,
+        convrot_groupsize=convrot_groupsize,
         codebook=W5A8_CODEBOOK,
         label="W5A8",
         pr_hint="Comfy-Org/comfy-kitchen#303, 'Add w3 and w5 quantization formats'",
@@ -1387,7 +1420,9 @@ def quantize_awq_w4a16(weight_f32: torch.Tensor, group_size: int = AWQ_W4A16_GRO
 
         return AWQ_W4A16_LAYOUT.quantize(weight_f32, **kwargs)
 
-    except TypeError:
+    except TypeError as exc:
+        if "unexpected keyword argument" not in str(exc):
+            raise
         return AWQ_W4A16_LAYOUT.quantize(weight_f32, group_size=group_size)
 
 
@@ -1928,7 +1963,7 @@ class StarUltimateModelConverter:
                         "includes it."
                     )
 
-                if not _probe_wxa8_bits(_wxa8_bits, _wxa8_codebook):
+                if not _probe_wxa8_bits(_wxa8_bits, _wxa8_codebook, device):
                     raise ValueError(
                         f"{_wxa8_label} requires a comfy-kitchen build with {_wxa8_bits}-bit "
                         "AsymW4A8Int8Layout support (Comfy-Org/comfy-kitchen#303). The installed "
@@ -1982,6 +2017,11 @@ class StarUltimateModelConverter:
                 raise ValueError(f"Mode is '{mode}' but no checkpoint is selected. Please choose a model from the dropdown.")
 
             ckpt_path = folder_paths.get_full_path("checkpoints", checkpoint)
+            if not ckpt_path:
+                raise ValueError(
+                    f"Checkpoint not found: '{checkpoint}'. It is no longer in the "
+                    "'checkpoints' folder -- pick another file from the dropdown."
+                )
             base_name = os.path.splitext(os.path.basename(ckpt_path))[0]
 
             # Same hardened loader the other modes use: safetensors metadata,
@@ -2043,6 +2083,8 @@ class StarUltimateModelConverter:
 
             input_bytes = sum(os.path.getsize(f) for f in files)
             sd, orig_meta = load_input(files)
+
+        refuse_overwriting_input(output_path, files)
 
         temp_diffusers_meta = {}
 
@@ -2253,7 +2295,6 @@ class StarUltimateModelConverter:
                     if (
                         active_force_int8
                         and any(name in k for name in active_force_int8)
-                        and target_format not in ("int4_tensorwise", "int4_tensorwise_pruned")
                     ):
                         print(f"🔒 FORCE-INT8: {k}")
 
@@ -2452,7 +2493,11 @@ class StarUltimateModelConverter:
                             weight_quantized = ck.quantize_per_tensor_fp8(v_tensor, weight_scale)
 
                         new_sd[k] = weight_quantized.cpu()
-                        new_sd[f"{base_k_file}.weight_scale"] = weight_scale.to(torch.bfloat16).cpu()
+                        # Keep the scale in F32, like every other scale in this file:
+                        # weight_scale is computed and used in f32, and a bf16 round
+                        # trip changes the value the loader dequantizes with by up to
+                        # 2^-9 -- a systematic per-layer gain error on every fp8 layer.
+                        new_sd[f"{base_k_file}.weight_scale"] = weight_scale.to(torch.float32).cpu()
 
                         quant_map["layers"][base_k_meta] = {"format": "float8_e4m3fn"}
                         counts["fp8"] += 1
@@ -2644,7 +2689,8 @@ class StarUltimateModelConverter:
 
                         try:
                             v_tensor_ready = v_tensor.float().contiguous()
-                            qdata, params = quantize_w4a8_convrot(v_tensor_ready)
+                            _w4a8_gs = _required_convrot_gs(v_tensor_ready.shape[-1])
+                            qdata, params = quantize_w4a8_convrot(v_tensor_ready, _w4a8_gs)
                             tensors = W4A8_LAYOUT.state_dict_tensors(qdata, params)
 
                             store_w4a8_quantized_weight(new_sd, k, tensors)
@@ -2653,7 +2699,7 @@ class StarUltimateModelConverter:
                                 "format": W4A8_FORMAT_NAME,
                                 "group_size": W4A8_GROUP_SIZE,
                                 "convrot": True,
-                                "convrot_groupsize": W4A8_CONVROT_GROUPSIZE,
+                                "convrot_groupsize": _w4a8_gs,
                             }
 
                             counts[target_format] += 1
@@ -2710,7 +2756,8 @@ class StarUltimateModelConverter:
 
                         try:
                             v_tensor_ready = v_tensor.float().contiguous()
-                            qdata, params = _wxa8_quantize(v_tensor_ready)
+                            _wxa8_convrot_gs = _required_convrot_gs(v_tensor_ready.shape[-1])
+                            qdata, params = _wxa8_quantize(v_tensor_ready, _wxa8_convrot_gs)
                             tensors = W4A8_LAYOUT.state_dict_tensors(qdata, params)
 
                             # Same tensor-suffix contract as W4A8 (weight_s_rel /
@@ -2951,21 +2998,21 @@ class StarUltimateModelConverter:
                         new_sd[k] = v
                         counts["kept"] += 1
 
-        failed_total = sum(n for name, n in counts.items() if "failed" in name.lower())
+        # Counters that mean "this layer did not get the requested format". Most are
+        # named FAILED bf16 / *_failed_bf16, but the SVDQuant -> plain-W4A4 degradation
+        # counter is named *_fallback_*, so a substring test on "failed" alone let
+        # strict=True report success on a degraded file. f16_fallback is a benign
+        # per-tensor GGUF choice and stays out.
+        failed_total = sum(
+            n for name, n in counts.items()
+            if "failed" in name.lower() or name == "svdquant_w4a4_fallback_w4a4"
+        )
         if strict and failed_total:
             raise RuntimeError(
                 f"strict=True: {failed_total} layer(s) failed to quantize to {target_format} "
                 f"and were kept in full precision. Counts: {dict(counts)}"
             )
 
-        if (is_w4a8 or is_w3a8 or is_w5a8 or is_w6a8) and any(
-            conf.get("format") == "nvfp4" for conf in quant_map["layers"].values()
-        ):
-            raise RuntimeError(
-                f"{target_format} selected but NVFP4 layers were produced -- layers escaped "
-                "the WxAy block into the generic fallback. Aborting instead of writing a "
-                "broken file. Check the target_format string and the WxAy block above."
-            )
         if not new_sd:
             raise RuntimeError(
                 "Refusing to write an empty model: no tensor survived the conversion "
@@ -3076,14 +3123,24 @@ class StarUltimateModelConverter:
             writer = gguf.GGUFWriter(path=None, arch=arch)
             writer.add_quantization_version(gguf.GGML_QUANT_VERSION)
 
-            counts = write_gguf_tensors(writer, sd, blacklist, keep_fp32, keep_fp16, quant_type)
+            try:
+                counts = write_gguf_tensors(
+                    writer, sd, blacklist, keep_fp32, keep_fp16, quant_type)
 
-            writer.write_header_to_file(path=dst_path)
-            writer.write_kv_data_to_file()
-            writer.write_tensors_to_file(progress=True)
-            writer.close()
+                writer.write_header_to_file(path=dst_path)
+                writer.write_kv_data_to_file()
+                writer.write_tensors_to_file(progress=True)
 
-            return counts
+                return counts
+            finally:
+                # Always release the handle. The k-quant stage below removes its
+                # intermediate file in a finally block, and on Windows an open handle
+                # turns that removal into a PermissionError that hides the real
+                # failure and leaves a multi-GB temp GGUF behind.
+                try:
+                    writer.close()
+                except Exception:
+                    pass
 
         if not is_kquant:
             os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
