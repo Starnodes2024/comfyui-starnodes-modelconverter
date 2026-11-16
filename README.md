@@ -65,7 +65,7 @@ file actually is.
 | ⭐ **Star Checkpoint Saver (AIO)** | Save model + CLIP + VAE as one AIO checkpoint (mixed quantizations supported) |
 | ⭐ **Starnodes AIO Saver** | Assemble an AIO checkpoint from files already on disk |
 
-<img width="854" height="296" alt="Star Ultimate Model Converter" src="https://github.com/user-attachments/assets/a290dc38-7f4f-4977-a34d-ec8859531dc7" />
+<img width="1000" alt="Star Ultimate Model Converter and Star Model Layers Info running in ComfyUI" src="docs/star-ultimate-model-converter.png" />
 
 ---
 
