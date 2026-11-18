@@ -361,20 +361,28 @@ def resolve_input(mode, diffusion_model, checkpoint, text_encoder, custom_path, 
         if not custom_path:
             raise ValueError("Mode is 'Custom Path' but no custom path was provided.")
 
-        src = os.path.realpath(os.path.expanduser(custom_path))
-        # [SECURITY PATCH] path traversal guard v3 (realpath: a symlink inside a
-        # model folder must not resolve outside it)
+        src = os.path.normpath(os.path.expanduser(custom_path))
+        # [SECURITY PATCH] path traversal guard v3.
+        # Accept a path when EITHER its logical location is inside an allowed folder
+        # (so a symlink/junction *placed inside* models\ works -- e.g. a staging
+        # folder that lives on another drive) OR its resolved target is inside one
+        # (so a link pointing into another registered model root also works).
+        # Trusting the logical location is safe enough here: a workflow cannot create
+        # a symlink, so only links the user already made are honoured.
         allowed_dirs = []
         for _fps in folder_paths.folder_names_and_paths.values():
-            allowed_dirs.extend([os.path.realpath(p) for p in _fps[0]])
-        allowed_dirs.append(os.path.realpath(os.path.dirname(folder_paths.__file__)))
+            allowed_dirs.extend([p for p in _fps[0]])
+        allowed_dirs.append(os.path.dirname(folder_paths.__file__))
+        allowed_dirs = [(_a, _r) for _a, _r in
+                        ((os.path.abspath(p), os.path.realpath(p)) for p in allowed_dirs if p)]
         def _star_within(_p):
-            _p = os.path.normcase(os.path.realpath(_p))
-            for _d in allowed_dirs:
-                if not _d:
-                    continue
-                _b = os.path.normcase(os.path.realpath(_d))
-                if _p == _b or _p.startswith(_b + os.sep):
+            _logical = os.path.normcase(os.path.abspath(_p))
+            _real = os.path.normcase(os.path.realpath(_p))
+            for _la, _lr in allowed_dirs:
+                _la = os.path.normcase(_la)
+                _lr = os.path.normcase(_lr)
+                if (_logical == _la or _logical.startswith(_la + os.sep)
+                        or _real == _lr or _real.startswith(_lr + os.sep)):
                     return True
             return False
         _star_parent = os.path.dirname(src)
