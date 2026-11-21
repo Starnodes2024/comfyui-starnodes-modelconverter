@@ -1,10 +1,24 @@
-# ⭐ StarNodes Model Converter v1.7
+# ⭐ StarNodes Model Converter v1.8
 
 **Quantize, convert, split and inspect diffusion models — inside ComfyUI.**
 
 Profiles for 45 model families, formats from FP32 down to 4-bit, an analyzer that tells you
 exactly what ended up in the file, and tools to take an all-in-one checkpoint apart or put one
 back together.
+
+---
+
+## 🎉 v1.8 — BRIA RMBG-3.0 profile
+
+RMBG-3.0 is Bria's generative background remover — Fibo 2.0 edit-turbo distilled to produce a
+4-step alpha matte — and its ComfyUI repack is a Fibo-2.0-shaped transformer with an extra
+Perceiver. The new **RMBG-3.0** profile reproduces Bria's official `int8_convrot` layout: all 215
+linears quantize (191 block, 16 Perceiver, 8 noise-refiner), while embedders, the final layer,
+modulation, norms, biases and RoPE stay BF16. Unlike the Fibo-2.0-edit-turbo recipes, the
+Perceiver **is** quantized here. 15.7 GB BF16 → ~7.8 GiB at `int8_convrot`, verified
+tensor-for-tensor against the official `briaai/RMBG-3.0-Comfy` file. The official file also
+carries `comfy_attention` backend records, which this converter leaves out — ComfyUI treats them
+as optional.
 
 ---
 
@@ -246,7 +260,7 @@ NVFP4 and some in INT4 within one file. `target_quant_format` accepts `NVFP4`, `
 
 ## Supported models
 
-47 profiles ship in `models.json`:
+48 profiles ship in `models.json`:
 
 - **Flux**: Flux1 / Flux2, Flux 2 Tight, Flux 3 Klein, Flux 3 Klein MaxQ
 - **Qwen**: Qwen-Image, Qwen-Image W4A8, Qwen-Image-2.1, Qwen-Image-2.1 MaxQ
@@ -258,6 +272,7 @@ NVFP4 and some in INT4 within one file. `target_quant_format` accepts `NVFP4`, `
   (PrunaAI's 8 MP image model, reproduces its official int8 ConvRot layout) and **H3-Image**
   (`minimax_h3_image`, MiniMax's 16 MP image model, matches the Comfy-Org int8 ConvRot repack)
 - **MOSS**: MOSS-Image, MOSS-Image MaxQ · **Fibo**: Fibo-2.0-edit-turbo, HQ, MaxQ
+- **BRIA**: RMBG-3.0 (generative alpha matte, Fibo 2.0 edit-turbo base)
 - **SeedVR**: SeedVR (All Versions), SeedVR MaxQ · **Ideogram-4** · **Chroma** · **Anima**
 - **Ming-Image** · **ERNIE-Image** · **Boogu-Image** · **Lens** · **ACE-Step** · **YuE2**
 - **SDXL (Not NVFP4)**
@@ -375,6 +390,11 @@ MIT — see [LICENSE](LICENSE). Respect the licenses of the models you convert.
   5-bit stores `5K/8` bytes with uniform levels. Both need a comfy-kitchen build containing #303,
   plus ComfyUI's `w3a8_int8` / `w5a8_int8` loader registration, before they can be loaded. The node
   probes the installed build and refuses with a clear message rather than misquantizing.
+
+### v1.8 (2026-11-21)
+- 🆕 **RMBG-3.0 profile** — BRIA's Fibo 2.0-based generative matte model: 215 linears at
+  `int8_convrot` (191 block + 16 Perceiver + 8 noise-refiner), everything else BF16; verified
+  tensor-for-tensor against the official `briaai/RMBG-3.0-Comfy` int8 file (15.7 GB → ~7.8 GiB).
 
 ### v1.7
 - 🆕 **W8A16 targets** — `w8a16`, `w8a16_convrot`, `w8a16_convrot_pruned`: INT8 weights, bf16 matmul
