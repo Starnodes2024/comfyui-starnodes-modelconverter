@@ -375,16 +375,8 @@ MIT — see [LICENSE](LICENSE). Respect the licenses of the models you convert.
 ## Changelog
 
 ### v1.8.1 (2026-11-24)
-- 🆕 **W3A8 / W5A8 ConvRot** — `w3a8_convrot`, `w3a8_convrot_pruned`, `w5a8_convrot`,
-  `w5a8_convrot_pruned`: the same `AsymW4A8Int8Layout` at `bits=3` and `bits=5`. 3-bit stores `3K/8`
-  bytes per row and decodes through an 8-entry codebook (so the file carries `weight_codebook`);
-  5-bit stores `5K/8` bytes with uniform levels. **Both are loadable now**: comfy-kitchen 0.2.42
-  provides the widths and ComfyUI 0.46.0 registers `w3a8_int8` / `w5a8_int8`
-  ([ComfyUI#17938](https://github.com/Comfy-Org/ComfyUI/pull/17938)). Verified on gfx1101 with
-  kitchen 0.2.42 + ComfyUI 0.46.0 — quantize, dequantize and the grouped GEMM through ComfyUI's
-  quantized linear all run on ROCm (relative error vs bf16 on the same weight: 3-bit 0.146,
-  5-bit 0.041, 4-bit 0.076, 6-bit 0.023). The node still probes the installed build and refuses
-  with a clear message rather than misquantizing.
+- 🆕 **W3A8 / W5A8 ConvRot** — 3-bit and 5-bit targets for the smallest files. Needs
+  comfy-kitchen 0.2.42+ and ComfyUI 0.46.0+.
 
 ### v1.8 (2026-11-21)
 - 🆕 **RMBG-3.0 profile** — BRIA's Fibo 2.0-based generative matte model: 215 linears at
