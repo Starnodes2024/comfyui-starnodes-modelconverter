@@ -1,4 +1,4 @@
-# ⭐ StarNodes Model Converter v1.8
+# ⭐ StarNodes Model Converter v1.8.1
 
 **Quantize, convert, split and inspect diffusion models — inside ComfyUI.**
 
@@ -374,14 +374,7 @@ MIT — see [LICENSE](LICENSE). Respect the licenses of the models you convert.
 
 ## Changelog
 
-### Unreleased
-- 🐛 **Correctness pass (2026-11-11).** ConvRot resolves its rotation group per layer (256 → 64 →
-  none) instead of assuming 256; per-layer failures report `⚠️` instead of `✅` (new `strict`
-  widget); AIO outputs keep the `model.diffusion_model.` prefix on their quant records, which
-  ComfyUI previously dropped at load; learned rounding quantizes on the target's own grid;
-  `Checkpoint` mode refuses non-AIO files. Plus AWQ-prescale, GGUF, `fp16`/`fp32` pinning and
-  hardening fixes — technical detail in commit `823966e`.
-
+### v1.8.1 (2026-11-24)
 - 🆕 **W3A8 / W5A8 ConvRot** — `w3a8_convrot`, `w3a8_convrot_pruned`, `w5a8_convrot`,
   `w5a8_convrot_pruned`: the same `AsymW4A8Int8Layout` at `bits=3` and `bits=5`. 3-bit stores `3K/8`
   bytes per row and decodes through an 8-entry codebook (so the file carries `weight_codebook`);
@@ -397,6 +390,12 @@ MIT — see [LICENSE](LICENSE). Respect the licenses of the models you convert.
 - 🆕 **RMBG-3.0 profile** — BRIA's Fibo 2.0-based generative matte model: 215 linears at
   `int8_convrot` (191 block + 16 Perceiver + 8 noise-refiner), everything else BF16; verified
   tensor-for-tensor against the official `briaai/RMBG-3.0-Comfy` int8 file (15.7 GB → ~7.8 GiB).
+- 🐛 **Correctness pass (2026-11-11).** ConvRot resolves its rotation group per layer (256 → 64 →
+  none) instead of assuming 256; per-layer failures report `⚠️` instead of `✅` (new `strict`
+  widget); AIO outputs keep the `model.diffusion_model.` prefix on their quant records, which
+  ComfyUI previously dropped at load; learned rounding quantizes on the target's own grid;
+  `Checkpoint` mode refuses non-AIO files. Plus AWQ-prescale, GGUF, `fp16`/`fp32` pinning and
+  hardening fixes — technical detail in commit `823966e`.
 
 ### v1.7
 - 🆕 **W8A16 targets** — `w8a16`, `w8a16_convrot`, `w8a16_convrot_pruned`: INT8 weights, bf16 matmul
