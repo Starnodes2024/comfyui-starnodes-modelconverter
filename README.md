@@ -100,11 +100,10 @@ Restart ComfyUI. All nodes appear under the **⭐StarNodes** category.
 - **comfy-kitchen** — the quantization library. Ships with recent ComfyUI; otherwise
   `pip install comfy-kitchen`. `w6a8_convrot` additionally needs a build containing
   [comfy-kitchen#191](https://github.com/Comfy-Org/comfy-kitchen) (the `bits` parameter);
-  `w3a8_convrot` / `w5a8_convrot` need
-  [comfy-kitchen#303](https://github.com/Comfy-Org/comfy-kitchen/pull/303) (3- and 5-bit widths),
-  and ComfyUI still needs the matching `w3a8_int8` / `w5a8_int8` loader registration before those
-  files can be loaded. The node probes the installed build and refuses with a clear message rather
-  than misquantizing.
+  `w3a8_convrot` / `w5a8_convrot` are provided by **comfy-kitchen 0.2.42** and later, and need
+  **ComfyUI 0.46.0** or later for the `w3a8_int8` / `w5a8_int8` loader registration
+  ([ComfyUI#17938](https://github.com/Comfy-Org/ComfyUI/pull/17938)). The node probes the
+  installed build and refuses with a clear message rather than misquantizing.
 - **PyTorch 2.0+**.
 - **GPU** — CUDA or ROCm. `device: cuda` is 10–50× faster than `cpu`; every format also converts on
   `cpu` if VRAM is the bottleneck. Native NVFP4 *compute* is NVIDIA-oriented, but NVFP4
@@ -183,9 +182,9 @@ folder holding two different models is refused instead of silently producing a b
 | **`w8a16`** | 8 | INT8 + scalar scale, bf16 matmul | weight-only 8-bit |
 | **`w8a16_convrot`** | 8 | INT8 + per-row scale + GS:256, bf16 matmul | weight-only 8-bit, high quality |
 | `int4_convrot` | 4 | INT4 + group scales + rotation GS:256/QGS:64 | ~25% size |
-| `w3a8_convrot` | 3 | packed 3-bit codes + 8-entry codebook + FP8 per-group scale | needs comfy-kitchen#303 |
+| `w3a8_convrot` | 3 | packed 3-bit codes + 8-entry codebook + FP8 per-group scale | comfy-kitchen ≥ 0.2.42, ComfyUI ≥ 0.46.0 |
 | `w4a8_convrot` | 4 | packed 4-bit codes + FP8 per-group scale | needs `AsymW4A8Int8Layout` |
-| `w5a8_convrot` | 5 | packed 5-bit codes (uniform ±15) + FP8 per-group scale | needs comfy-kitchen#303 |
+| `w5a8_convrot` | 5 | packed 5-bit codes (uniform ±15) + FP8 per-group scale | comfy-kitchen ≥ 0.2.42, ComfyUI ≥ 0.46.0 |
 | `w6a8_convrot` | 6 | packed 6-bit codes + FP8 per-group scale | needs comfy-kitchen#191 |
 | `awq_w4a16` | 4 | 4-bit + scale/zero (group 64) | weight-only 4-bit |
 | `w4a4` | 4 | INT4 weights + INT4 activations | fastest 4-bit path |
@@ -295,7 +294,7 @@ critical paths stay BF16 while the rest is quantized.
 | INT8 ConvRot | ★★★☆☆ | ★★★★☆ | ComfyUI with `comfy_quant` | ★★★☆☆ |
 | W8A16 ConvRot | ★★★☆☆ | ★★★★☆ | ComfyUI with `comfy_quant` | ★★☆☆☆ |
 | INT4 ConvRot | ★★★★★ | ★★★★☆ | SM 8.0+ / ROCm | ★★★★☆ |
-| W3A8 / W4A8 / W5A8 / W6A8 ConvRot | ★★★★★ | ★★★★☆ | comfy-kitchen with `AsymW4A8Int8Layout` (3/5-bit need #303) | ★★★★☆ |
+| W3A8 / W4A8 / W5A8 / W6A8 ConvRot | ★★★★★ | ★★★★☆ | comfy-kitchen with `AsymW4A8Int8Layout` (3/5-bit need kitchen ≥ 0.2.42) | ★★★★☆ |
 | SVDQuant W4A4 | ★★★★★ | ★★★★★ | comfy-kitchen, needs `TensorCoreConvRotW4A4Layout` | ★★☆☆☆ |
 | FP16 | ★★☆☆☆ | ★★★★★ | All hardware | ★★★★☆ |
 | FP32 | ★☆☆☆☆ | ★★★★★ | All hardware | ★★☆☆☆ |
@@ -384,12 +383,15 @@ MIT — see [LICENSE](LICENSE). Respect the licenses of the models you convert.
   hardening fixes — technical detail in commit `823966e`.
 
 - 🆕 **W3A8 / W5A8 ConvRot** — `w3a8_convrot`, `w3a8_convrot_pruned`, `w5a8_convrot`,
-  `w5a8_convrot_pruned`: the same `AsymW4A8Int8Layout` at `bits=3` and `bits=5`
-  ([comfy-kitchen#303](https://github.com/Comfy-Org/comfy-kitchen/pull/303)). 3-bit stores `3K/8`
+  `w5a8_convrot_pruned`: the same `AsymW4A8Int8Layout` at `bits=3` and `bits=5`. 3-bit stores `3K/8`
   bytes per row and decodes through an 8-entry codebook (so the file carries `weight_codebook`);
-  5-bit stores `5K/8` bytes with uniform levels. Both need a comfy-kitchen build containing #303,
-  plus ComfyUI's `w3a8_int8` / `w5a8_int8` loader registration, before they can be loaded. The node
-  probes the installed build and refuses with a clear message rather than misquantizing.
+  5-bit stores `5K/8` bytes with uniform levels. **Both are loadable now**: comfy-kitchen 0.2.42
+  provides the widths and ComfyUI 0.46.0 registers `w3a8_int8` / `w5a8_int8`
+  ([ComfyUI#17938](https://github.com/Comfy-Org/ComfyUI/pull/17938)). Verified on gfx1101 with
+  kitchen 0.2.42 + ComfyUI 0.46.0 — quantize, dequantize and the grouped GEMM through ComfyUI's
+  quantized linear all run on ROCm (relative error vs bf16 on the same weight: 3-bit 0.146,
+  5-bit 0.041, 4-bit 0.076, 6-bit 0.023). The node still probes the installed build and refuses
+  with a clear message rather than misquantizing.
 
 ### v1.8 (2026-11-21)
 - 🆕 **RMBG-3.0 profile** — BRIA's Fibo 2.0-based generative matte model: 215 linears at
