@@ -585,24 +585,36 @@
       "preserve_extended_metadata": false
     },
     "Text-Encoder": {
-      "_note": "Generic profile for Text Encoders (e.g., CLIP, T5, Llama, Mistral). CRITICAL: preserve_extended_metadata MUST be true for LLM-based encoders (Mistral/Gemma) so ComfyUI loads the correct hidden_size config.",
+      "_note": "Comfy-Org's own qwen3.5_9b text-encoder policy (verified against Comfy-Org/MOSS-Image text_encoders/qwen3.5_9b_int8_convrot.safetensors): the vision tower, embed_tokens and lm_head are pinned to int8_convrot (ComfyUI only accepts fp8/int8 for quantized embeddings, so a grouped target cannot take them at 6 bits), while linear_attn.in_proj_a/b, visual.merger and mtp.fc stay bf16 and linear_attn.A_log / linear_attn.norm stay F32. At int8_convrot this reproduces the official file tensor for tensor (317 layers, same records); at w3a8/w4a8/w5a8/w6a8 the same 317 layers are quantized with the cheap width for the language model and 8-bit for embeddings/vision.",
       "blacklist": [
-        "visual.",
         "bias",
         "norm",
         "scale",
         "token_embedding",
         "position_embedding",
         "shared.weight",
-        "lm_head",
         "final_layer_norm",
-        "embed_tokens",
         "text_model.embeddings",
         "pos_embed",
-        "patch_embed"
+        "patch_embed",
+        "in_proj_a",
+        "in_proj_b",
+        "visual.merger",
+        "mtp.fc",
+        "A_log",
+        "linear_attn.norm"
       ],
       "fp8_layers": [],
-      "preserve_extended_metadata": true
+      "preserve_extended_metadata": true,
+      "keep_fp32": [
+        "A_log",
+        "linear_attn.norm"
+      ],
+      "int8_convrot_layers": [
+        "embed_tokens",
+        "lm_head",
+        "visual."
+      ]
     },
     "Text-Encoder HQ": {
       "_note": "Balanced high-quality TE profile for int8_convrot (also valid for fp8/nvfp4). Preserves embeddings, output heads, norms/biases, attention biases, rotary freqs, the first transformer block, K/V projections, and attention output projections in BF16/FP16. MLPs stay quantized (biggest savings, lowest sensitivity). Rule of thumb: +1 GB per ~1B protected params vs full INT8. preserve_extended_metadata MUST stay true for LLM-based encoders. For max quality pick 'Text-Encoder MaxQ'.",

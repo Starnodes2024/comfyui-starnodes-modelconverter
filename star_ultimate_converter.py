@@ -585,23 +585,32 @@ def rotate_weight(weight: torch.Tensor, h: torch.Tensor, group_size: int) -> tor
 
 
 def resolve_int8_convrot_group_size(in_features: int, requested_group_size: int):
-    """256 -> 64 -> None fallback, matching convrot.py exactly."""
-    if in_features % requested_group_size == 0:
-        return requested_group_size
-    if requested_group_size == 256 and in_features % 64 == 0:
-        return 64
+    """Largest usable regular-Hadamard group, halving by 4: 256 -> 64 -> 16 -> 4.
+
+    Every step is a power of four, so `build_hadamard` can construct it. The chain
+    stops at no rotation, which is what the reference convrot.py does for sizes that
+    divide none of them. Group 16 matters in practice: Qwen3.5's vision block
+    `mlp.linear_fc2` has in_features 4304 (= 269 * 16), and Comfy-Org's own
+    qwen3.5_9b int8 file records `convrot_groupsize: 16` for those 27 layers rather
+    than leaving them unrotated.
+    """
+    gs = requested_group_size
+    while gs >= 4:
+        if in_features % gs == 0:
+            return gs
+        gs //= 4
     return None
 
 
 def _required_convrot_gs(in_features: int) -> int:
-    """ConvRot W4A4/W4A8 have no unrotated mode: a layer with no usable 256/64
+    """ConvRot W4A4/W4A8 have no unrotated mode: a layer with no usable 256/64/16/4
     group must fail loudly instead of being quantized with a group size the
     layout will reject (the caller degrades it to bf16 and counts the failure)."""
     gs = resolve_int8_convrot_group_size(in_features, CONVROT_GROUPSIZE)
     if gs is None:
         raise ValueError(
-            f"in_features {in_features} is not divisible by 64; "
-            "ConvRot W4A4/W4A8 needs a rotate group of 256 or 64"
+            f"in_features {in_features} is not divisible by 4; "
+            "ConvRot W4A4/W4A8 needs a rotate group of 256, 64, 16 or 4"
         )
     return gs
 
